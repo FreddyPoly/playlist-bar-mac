@@ -38,6 +38,14 @@ final class AudioPlayer: ObservableObject {
         set { player.volume = newValue }
     }
 
+    /// Current elapsed playback position in seconds — exposed for callers that need to observe
+    /// progress without `AudioPlayer` needing to know why (e.g. BGM's listen-count threshold, see
+    /// `BGMListenTracker`/bgm-005). Backed by the same `AVPlayer` state as everything else here,
+    /// not a second, competing notion of "how far into this track are we."
+    var currentTime: Double {
+        CMTimeGetSeconds(player.currentTime())
+    }
+
     /// Extra time past `knownDuration` before the watchdog fires, covering yt-dlp's duration
     /// being a rounded integer and small encoder/timing discrepancies — large enough to never
     /// cut off real trailing content, tiny compared to the multi-minute delay it replaces.
@@ -113,6 +121,18 @@ final class AudioPlayer: ObservableObject {
         player.play()
         isPlaying = true
         beginBackgroundActivity()
+    }
+
+    /// Seeks the currently loaded item back to 0:00 and (re)starts playback — used by BGM's Reset
+    /// (bgm-008), which restarts the *current* video rather than jumping to a different one; no
+    /// resolution/reload involved since the same item is already loaded. Resets
+    /// `hasFiredFinishForCurrentItem` so the end-of-track watchdog/notification can fire again for
+    /// this fresh lap through the same item, in the unlikely case it had already fired (a race
+    /// between Reset and the item naturally ending at the same moment).
+    func restart() {
+        player.seek(to: .zero)
+        hasFiredFinishForCurrentItem = false
+        play()
     }
 
     func pause() {

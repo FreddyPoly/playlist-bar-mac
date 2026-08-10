@@ -36,6 +36,7 @@ struct ContentView: View {
                 ForEach(FixedPlaylists.all) { playlist in
                     Text(playlist.name).tag(Optional(playlist))
                 }
+                Text(PlaybackController.bgmPlaylist.name).tag(Optional(PlaybackController.bgmPlaylist))
             }
             .labelsHidden()
 
@@ -90,20 +91,54 @@ struct ContentView: View {
 
             ScrollView {
                 VStack(alignment: .leading, spacing: 2) {
-                    ForEach(displayedTracks) { item in
-                        Button {
-                            Task { await controller.selectTrack(at: item.index) }
-                        } label: {
-                            Text(item.track.title)
-                                .lineLimit(1)
-                                .truncationMode(.tail)
-                                .fontWeight(item.index == controller.currentIndex ? .semibold : .regular)
-                                .foregroundStyle(
-                                    item.index == controller.currentIndex ? Color.accentColor : Color.primary
-                                )
+                    if controller.isBGMActive {
+                        // No "next" slot here, unlike the fixed-playlist list below — BGM's next
+                        // pick genuinely isn't decided until it's needed, and an earlier design
+                        // showing the full pooled catalog was rejected during the interview for
+                        // this feature as not actually helping pick a track. See SPEC.md's "BGM
+                        // channel playback".
+                        ForEach(displayedBGMHistory) { item in
+                            Button {
+                                Task { await controller.selectBGMHistoryEntry(at: item.index) }
+                            } label: {
+                                HStack {
+                                    Text(item.track.title)
+                                        .lineLimit(1)
+                                        .truncationMode(.tail)
+                                        .fontWeight(
+                                            item.index == controller.bgmCurrentHistoryIndex ? .semibold : .regular
+                                        )
+                                        .foregroundStyle(
+                                            item.index == controller.bgmCurrentHistoryIndex
+                                                ? Color.accentColor : Color.primary
+                                        )
+                                    Spacer(minLength: 8)
+                                    // Local listen count, per track — makes the fewest-listens
+                                    // selection visible rather than a black box (SPEC.md).
+                                    Text("\(item.track.listenCount)")
+                                        .font(.caption)
+                                        .foregroundStyle(.secondary)
+                                }
                                 .frame(maxWidth: .infinity, alignment: .leading)
+                            }
+                            .buttonStyle(.plain)
                         }
-                        .buttonStyle(.plain)
+                    } else {
+                        ForEach(displayedTracks) { item in
+                            Button {
+                                Task { await controller.selectTrack(at: item.index) }
+                            } label: {
+                                Text(item.track.title)
+                                    .lineLimit(1)
+                                    .truncationMode(.tail)
+                                    .fontWeight(item.index == controller.currentIndex ? .semibold : .regular)
+                                    .foregroundStyle(
+                                        item.index == controller.currentIndex ? Color.accentColor : Color.primary
+                                    )
+                                    .frame(maxWidth: .infinity, alignment: .leading)
+                            }
+                            .buttonStyle(.plain)
+                        }
                     }
                 }
             }
@@ -168,13 +203,21 @@ struct ContentView: View {
     /// Selecting a playlist triggers the actual switch (which has real side effects: stopping
     /// current playback, loading, resolving, persisting) rather than just storing a value, so
     /// this can't be a direct `$controller.currentPlaylist` binding — `currentPlaylist` is
-    /// intentionally read-only from outside `PlaybackController`.
+    /// intentionally read-only from outside `PlaybackController`. BGM routes to
+    /// `switchToBGM()` instead of `switchTo(playlist:)` — it's not one of `FixedPlaylists.all`,
+    /// just a `Playlist` value shaped enough like one for the picker to display/tag it the same
+    /// way (see `PlaybackController.bgmPlaylist`'s own doc comment on why it's a single shared
+    /// constant, which is what makes this equality check reliable).
     private var playlistSelection: Binding<Playlist?> {
         Binding(
             get: { controller.currentPlaylist },
             set: { newValue in
                 guard let newValue else { return }
-                Task { await controller.switchTo(playlist: newValue) }
+                if newValue == PlaybackController.bgmPlaylist {
+                    Task { await controller.switchToBGM() }
+                } else {
+                    Task { await controller.switchTo(playlist: newValue) }
+                }
             }
         )
     }
@@ -192,6 +235,22 @@ struct ContentView: View {
         let index: Int
         let track: CachedTrack
         var id: Int { index }
+    }
+
+    private struct DisplayedBGMTrack: Identifiable {
+        let index: Int
+        let track: BGMTrack
+        var id: String { track.videoID }
+    }
+
+    /// Up to 5 previously-played BGM videos this session plus the currently-displayed/played one
+    /// (`controller.bgmCurrentHistoryIndex`), in play order — never a "next" window, since BGM's
+    /// next pick isn't decided until it's needed. See SPEC.md's "BGM channel playback".
+    private var displayedBGMHistory: [DisplayedBGMTrack] {
+        guard let current = controller.bgmCurrentHistoryIndex,
+              controller.bgmHistory.indices.contains(current) else { return [] }
+        let lower = max(0, current - 5)
+        return (lower...current).map { DisplayedBGMTrack(index: $0, track: controller.bgmHistory[$0]) }
     }
 
     /// The current track plus up to 5 previous and up to 5 next, by playlist index — not

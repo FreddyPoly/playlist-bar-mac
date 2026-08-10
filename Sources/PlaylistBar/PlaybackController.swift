@@ -46,6 +46,52 @@ final class PlaybackController: ObservableObject {
     private let player = AudioPlayer()
     private let preloader = NextTrackPreloader()
     private let loudnessCoordinator = LoudnessGainCoordinator()
+    private let bgmLoader = BGMLoader()
+    private let bgmListenTracker = BGMListenTracker()
+
+    /// The playlist-picker slug BGM uses — not one of `FixedPlaylists.all`, but reuses the same
+    /// per-slug `PlayerStateStore` persistence (last-played track, last-active playlist) as the 4
+    /// fixed playlists. `currentPlaylist` is set to `Self.bgmPlaylist` while BGM is active — see
+    /// `switchToBGM()`.
+    static let bgmPlaylistSlug = "bgm"
+
+    /// The synthetic `Playlist` value BGM uses for `currentPlaylist` — a single shared constant
+    /// (not constructed ad hoc at each call site) because `Playlist`'s `Equatable`/`Hashable`
+    /// conformance is field-based (slug/name/url, not just `id`), so the picker's tag comparison
+    /// (`bgm-010`) would silently break if two call sites ever constructed slightly different
+    /// literal values for it.
+    static let bgmPlaylist = Playlist(slug: bgmPlaylistSlug, name: "BGM", url: "")
+
+    /// True whenever BGM (not one of the 4 fixed playlists) is the active selection. Derived from
+    /// `currentPlaylist` rather than a separate flag, so it can never drift out of sync with it.
+    var isBGMActive: Bool { currentPlaylist?.slug == Self.bgmPlaylistSlug }
+
+    /// Videos actually played during BGM this session, in play order — used by `Previous`
+    /// (bgm-007, not yet implemented) to walk backward. Deliberately **not** persisted (see
+    /// SPEC.md's "BGM channel playback": session-only, starts empty on every launch) and, unlike
+    /// `switchTo(playlist:)`'s full state reset, **not** cleared on every `switchToBGM()` call —
+    /// only reset by a fresh app launch — so switching away to a fixed playlist and back to BGM
+    /// within the same session keeps the history intact.
+    @Published private(set) var bgmHistory: [BGMTrack] = []
+
+    /// Position within `bgmHistory` currently being played via Previous navigation (bgm-007) —
+    /// `nil` means "at the live edge" (the most recently played video, `bgmHistory.last`). Reset
+    /// to `nil` on `switchToBGM()` and whenever a fresh pick is made via `advanceBGM` (manual Next
+    /// or natural auto-advance) — see `advanceBGM`'s "Next always picks fresh, discarding forward
+    /// history" handling.
+    private var bgmHistoryPosition: Int?
+
+    /// `bgmHistory`'s index currently being displayed/played — `bgmHistoryPosition` if set (mid
+    /// walk-back), otherwise the live edge (`bgmHistory.count - 1`). `nil` only when there's no
+    /// BGM history at all yet. Exposed (rather than `bgmHistoryPosition` itself, an implementation
+    /// detail) for `bgm-011`'s history-aware track list to window/highlight against. Not
+    /// `@Published` itself, but every call that changes `bgmHistoryPosition` also changes
+    /// `tracks`/`currentIndex` (both `@Published`) in the same method, so SwiftUI still
+    /// re-evaluates this correctly on the next render.
+    var bgmCurrentHistoryIndex: Int? {
+        guard !bgmHistory.isEmpty else { return nil }
+        return bgmHistoryPosition ?? (bgmHistory.count - 1)
+    }
 
     /// Guards against a second state-mutating call (switchTo/previous/next/...) starting before
     /// an earlier one has finished resolving — without this, a fast double-action could let an
@@ -143,6 +189,10 @@ final class PlaybackController: ObservableObject {
 
         player.stop()
         preloader.cancel()
+        // A still-armed BGM listen tracker would otherwise keep polling `player.currentTime`
+        // against whatever this fixed playlist now loads, and could misattribute a listen to the
+        // BGM video that's no longer playing — see bgm-005's wiring note.
+        bgmListenTracker.cancel()
         isPlaying = false
         hasLoadedCurrentTrack = false
         currentIndex = nil
@@ -155,14 +205,258 @@ final class PlaybackController: ObservableObject {
         await play(startingAt: startIndex, generation: generation)
     }
 
+    /// Switches to BGM: loads the pooled channel cache (bgm-003, cache-first), resumes the
+    /// persisted last-played BGM video if one exists, otherwise picks a fresh weighted-random
+    /// video (bgm-004), and starts playing it immediately — mirrors `switchTo(playlist:)`'s
+    /// always-autoplay behavior. Unlike `switchTo(playlist:)`, does **not** reset `bgmHistory` —
+    /// see its own doc comment for why.
+    func switchToBGM() async {
+        switchGeneration += 1
+        let generation = switchGeneration
+
+        player.stop()
+        preloader.cancel()
+        bgmListenTracker.cancel()
+        isPlaying = false
+        hasLoadedCurrentTrack = false
+        currentPlaylist = Self.bgmPlaylist
+        currentIndex = nil
+        tracks = []
+        bgmHistoryPosition = nil
+
+        await bgmLoader.load()
+        guard generation == switchGeneration else { return }
+
+        let pool = bgmLoader.tracks
+        guard !pool.isEmpty else {
+            errorMessage = bgmLoader.lastScanErrorMessage
+            return
+        }
+        errorMessage = nil
+
+        let savedVideoID = PlayerStateStore.lastPlayedTrack(forPlaylistSlug: Self.bgmPlaylistSlug)
+        let startTrack = savedVideoID.flatMap { id in pool.first(where: { $0.videoID == id }) }
+            ?? BGMSelector.selectNext(from: pool, excluding: nil)
+
+        guard let startTrack else { return }
+        await playBGM(startingFrom: startTrack, generation: generation, appendToHistory: true)
+    }
+
+    /// Picks a new BGM video (excluding whatever's currently playing, per `BGMSelector`) and
+    /// plays it — the shared implementation behind both manual `next()` and BGM's auto-advance
+    /// branch in `advanceOnFinish()`, same "one helper, two callers" shape as
+    /// `play(startingAt:generation:)` serves the fixed-playlist equivalents.
+    private func advanceBGM(generation: Int) async {
+        guard let current = tracks.first else { return }
+        guard let picked = BGMSelector.selectNext(from: bgmLoader.tracks, excluding: current.videoID) else {
+            guard generation == switchGeneration else { return }
+            player.stop()
+            isPlaying = false
+            currentIndex = nil
+            tracks = []
+            hasLoadedCurrentTrack = false
+            return
+        }
+
+        // A fresh pick always discards any "forward" history left over from a prior Previous
+        // walk-back — bgm-007's explicit decision: Next never redoes forward through history,
+        // it always picks fresh and that becomes the new end of history.
+        if let position = bgmHistoryPosition {
+            bgmHistory = Array(bgmHistory.prefix(position + 1))
+            bgmHistoryPosition = nil
+        }
+
+        await playBGM(startingFrom: picked, generation: generation, appendToHistory: true)
+    }
+
+    /// Walks backward through `bgmHistory` (like a browser back button) and replays that video —
+    /// a no-op if there's no earlier entry (e.g. right after switching to BGM, on its first
+    /// video). Doesn't grow `bgmHistory` (the target is already in it) or change the persisted
+    /// last-active playlist beyond the usual "this is now playing" update `playBGM` already does.
+    private func previousBGM() async {
+        let currentPosition = bgmHistoryPosition ?? (bgmHistory.count - 1)
+        let newPosition = currentPosition - 1
+        guard bgmHistory.indices.contains(newPosition) else { return }
+
+        switchGeneration += 1
+        let generation = switchGeneration
+        bgmHistoryPosition = newPosition
+        await playBGM(startingFrom: bgmHistory[newPosition], generation: generation, appendToHistory: false)
+    }
+
+    /// Jumps directly to `bgmHistory[index]` (e.g. a click on a past entry in the BGM track list —
+    /// bgm-011) — same effect as pressing Previous repeatedly until reaching that point. A no-op
+    /// for an out-of-range index, or when BGM isn't the active selection.
+    func selectBGMHistoryEntry(at index: Int) async {
+        guard isBGMActive, bgmHistory.indices.contains(index) else { return }
+
+        switchGeneration += 1
+        let generation = switchGeneration
+        bgmHistoryPosition = index == bgmHistory.count - 1 ? nil : index
+        await playBGM(startingFrom: bgmHistory[index], generation: generation, appendToHistory: false)
+    }
+
+    /// Resolves and plays `startingTrack`, auto-skipping to another weighted-random pick (bounded
+    /// by pool size — same "never hang even if everything's unavailable" guarantee as
+    /// `TrackAvailabilityResolver`) if it turns out to be unavailable or otherwise fails to
+    /// resolve. On success, persists the track as the new BGM position, appends it to
+    /// `bgmHistory`, and arms `bgmListenTracker` for it.
+    ///
+    /// Represents the "current track" via the same `tracks`/`currentIndex` mechanism the 4 fixed
+    /// playlists use (a single-element `tracks` array, `currentIndex = 0`) rather than separate
+    /// BGM-specific published state — this is what makes `updateNowPlayingInfo()`, the menu bar
+    /// title, and `applyEffectiveVolume()`/`currentTrackGain` all work correctly for BGM with no
+    /// changes to any of them.
+    private func playBGM(
+        startingFrom startingTrack: BGMTrack, generation: Int, appendToHistory: Bool
+    ) async {
+        var candidate = startingTrack
+        var excludedVideoIDs: Set<String> = []
+        var attemptsRemaining = max(bgmLoader.tracks.count, 1)
+
+        while attemptsRemaining > 0 {
+            attemptsRemaining -= 1
+            guard generation == switchGeneration else { return }
+
+            tracks = [CachedTrack(
+                videoID: candidate.videoID, title: candidate.title,
+                normalizationGain: candidate.normalizationGain
+            )]
+            currentIndex = 0
+            isResolvingTrack = true
+            isAwaitingLoudnessAnalysis = false
+
+            let resolution: StreamResolution
+            do {
+                let videoID = candidate.videoID
+                resolution = try await Task.detached(priority: .utility) {
+                    try StreamResolver.resolve(videoID: videoID)
+                }.value
+            } catch StreamResolver.ResolutionError.ytDlpNotFound {
+                guard generation == switchGeneration else { return }
+                isResolvingTrack = false
+                player.stop()
+                isPlaying = false
+                hasLoadedCurrentTrack = false
+                errorMessage = "yt-dlp not found — run `brew install yt-dlp`"
+                return
+            } catch {
+                // Any other resolution failure is about this one video, not the pool as a whole —
+                // treat it like .unavailable below rather than aborting BGM entirely.
+                resolution = .unavailable
+            }
+
+            guard generation == switchGeneration else { return }
+            isResolvingTrack = false
+
+            guard case .available(let url, let duration) = resolution else {
+                excludedVideoIDs.insert(candidate.videoID)
+                let remainingPool = bgmLoader.tracks.filter { !excludedVideoIDs.contains($0.videoID) }
+                guard let next = BGMSelector.selectNext(from: remainingPool, excluding: nil) else {
+                    break
+                }
+                candidate = next
+                continue
+            }
+
+            errorMessage = nil
+
+            // Loudness normalization for BGM, deliberately simpler than the fixed-playlist path's
+            // LoudnessGainCoordinator/NextTrackPreloader combo: no background preload head-start
+            // (BGM's next pick isn't decided until it's needed, so there's nothing to preload
+            // ahead of time — see this issue's Notes), and a standalone bounded wait rather than
+            // sharing an in-flight-task cache. A timed-out-but-later-successful analysis is not
+            // retroactively cached the way the fixed-playlist coordinator's is — a smaller
+            // regression than skipping normalization for BGM entirely, and simpler to reason
+            // about; noted as a possible future improvement, not silently dropped.
+            if candidate.normalizationGain == nil {
+                isAwaitingLoudnessAnalysis = true
+                let measured = await measureBGMGain(
+                    url: url, timeout: Self.loudnessAnalysisTimeout
+                )
+                guard generation == switchGeneration else { return }
+                isAwaitingLoudnessAnalysis = false
+                if let measured {
+                    BGMCacheStore.setNormalizationGain(measured, forVideoID: candidate.videoID)
+                    if tracks.indices.contains(0) {
+                        tracks[0].normalizationGain = measured
+                    }
+                }
+            }
+
+            applyEffectiveVolume()
+            player.load(url: url, duration: duration, autoplay: true)
+            hasLoadedCurrentTrack = true
+            isPlaying = true
+
+            PlayerStateStore.setLastPlayedTrack(candidate.videoID, forPlaylistSlug: Self.bgmPlaylistSlug)
+            PlayerStateStore.setLastActivePlaylist(slug: Self.bgmPlaylistSlug)
+
+            // A history walk-back (Previous, or clicking a past entry — bgm-007) replays a track
+            // already present in `bgmHistory`; only a genuinely fresh pick (switchToBGM, Next,
+            // auto-advance) should grow it.
+            if appendToHistory {
+                bgmHistory.append(candidate)
+            }
+            bgmListenTracker.start(
+                videoID: candidate.videoID, duration: candidate.duration,
+                currentTime: { [weak self] in self?.player.currentTime ?? 0 }
+            )
+            return
+        }
+
+        // Every candidate was tried (or the pool ran out mid-retry) with none playable.
+        guard generation == switchGeneration else { return }
+        player.stop()
+        isPlaying = false
+        currentIndex = nil
+        tracks = []
+        hasLoadedCurrentTrack = false
+    }
+
+    /// Measures loudness gain for a BGM track's resolved stream, bounded by `timeout` — same
+    /// continuation-race shape as `LoudnessGainCoordinator.gain(for:url:playlistSlug:timeout:)`
+    /// (avoiding `withTaskGroup`'s "waits for every child including the loser" pitfall — see that
+    /// type's own Notes for the real bug that shape caused), but without an in-flight-task cache
+    /// shared with a preloader, since BGM has none. Returns `nil` on timeout or genuine failure —
+    /// never written back to the cache in that case, same "fallback isn't a measurement" rule.
+    private func measureBGMGain(url: URL, timeout: Duration) async -> Double? {
+        await withCheckedContinuation { (continuation: CheckedContinuation<Double?, Never>) in
+            var hasResumed = false
+
+            Task {
+                let measured = try? await Task.detached(priority: .utility) {
+                    try LoudnessAnalyzer.measureGain(url: url)
+                }.value
+                if !hasResumed {
+                    hasResumed = true
+                    continuation.resume(returning: measured)
+                }
+            }
+            Task {
+                try? await Task.sleep(for: timeout)
+                if !hasResumed {
+                    hasResumed = true
+                    continuation.resume(returning: nil)
+                }
+            }
+        }
+    }
+
     /// Restores the last active playlist and its last-played track for display **without**
     /// starting playback — the one place SPEC.md's "switching plays immediately" rule
     /// deliberately doesn't apply, so the app doesn't start making noise unexpectedly right after
     /// login. Meant to be called once at app launch (see startup-002); a no-op if there's no
     /// prior session to restore.
     func restoreLastSession() async {
-        guard let slug = PlayerStateStore.lastActivePlaylistSlug(),
-              let playlist = FixedPlaylists.all.first(where: { $0.slug == slug }) else {
+        guard let slug = PlayerStateStore.lastActivePlaylistSlug() else { return }
+
+        if slug == Self.bgmPlaylistSlug {
+            await restoreBGMSession()
+            return
+        }
+
+        guard let playlist = FixedPlaylists.all.first(where: { $0.slug == slug }) else {
             return
         }
 
@@ -174,6 +468,44 @@ final class PlaybackController: ObservableObject {
         }
 
         currentIndex = startIndex
+    }
+
+    /// BGM equivalent of `restoreLastSession()`'s fixed-playlist path: loads the pooled cache
+    /// (cache-first) and displays the persisted last-played BGM video — or a fresh weighted-random
+    /// pick if there's no saved video yet — **without** resolving a stream or starting playback,
+    /// same "restore for display only" contract `loadAndDetermineStartIndex` gives the fixed
+    /// playlists. Seeds `bgmHistory` with the restored track so it behaves as the first (and, at
+    /// this point, only) entry — pressing Previous immediately after a restore correctly has
+    /// nothing earlier to go to.
+    private func restoreBGMSession() async {
+        switchGeneration += 1
+        let generation = switchGeneration
+
+        currentPlaylist = Self.bgmPlaylist
+        bgmHistoryPosition = nil
+
+        await bgmLoader.load()
+        guard generation == switchGeneration else { return }
+
+        let pool = bgmLoader.tracks
+        guard !pool.isEmpty else {
+            errorMessage = bgmLoader.lastScanErrorMessage
+            return
+        }
+        errorMessage = nil
+
+        let savedVideoID = PlayerStateStore.lastPlayedTrack(forPlaylistSlug: Self.bgmPlaylistSlug)
+        let restoredTrack = savedVideoID.flatMap { id in pool.first(where: { $0.videoID == id }) }
+            ?? BGMSelector.selectNext(from: pool, excluding: nil)
+
+        guard let restoredTrack else { return }
+
+        tracks = [CachedTrack(
+            videoID: restoredTrack.videoID, title: restoredTrack.title,
+            normalizationGain: restoredTrack.normalizationGain
+        )]
+        currentIndex = 0
+        bgmHistory = [restoredTrack]
     }
 
     /// Loads (cache-first) `playlist`'s track list into `tracks`/`currentPlaylist`/`errorMessage`
@@ -215,6 +547,20 @@ final class PlaybackController: ObservableObject {
         if hasLoadedCurrentTrack {
             player.play()
             isPlaying = true
+        } else if isBGMActive {
+            // The state right after `restoreBGMSession()`: a track is displayed but never
+            // resolved/played. Route through `playBGM` (not the fixed-playlist `play(startingAt:)`
+            // below) so this first real play still gets BGM's own gain persistence, listen
+            // tracking, and history bookkeeping — bailing cleanly if the restored video somehow
+            // isn't in the pool anymore (e.g. a background refresh dropped it between restore and
+            // this press) rather than guessing at its duration.
+            guard let current = tracks.first,
+                  let candidate = bgmLoader.tracks.first(where: { $0.videoID == current.videoID }) else {
+                return
+            }
+            switchGeneration += 1
+            let generation = switchGeneration
+            await playBGM(startingFrom: candidate, generation: generation, appendToHistory: false)
         } else {
             switchGeneration += 1
             let generation = switchGeneration
@@ -252,17 +598,40 @@ final class PlaybackController: ObservableObject {
     }
 
     /// Steps to the previous track by playlist index, wrapping from the first track to the last.
+    /// While BGM is active, this instead walks backward through the session's play history
+    /// (bgm-007) — see `previousBGM()`.
     func previous() async {
-        await step(by: -1)
+        if isBGMActive {
+            await previousBGM()
+        } else {
+            await step(by: -1)
+        }
     }
 
     /// Steps to the next track by playlist index, wrapping from the last track to the first.
+    /// While BGM is active, this instead picks a new video via `BGMSelector` (bgm-004).
     func next() async {
-        await step(by: 1)
+        if isBGMActive {
+            switchGeneration += 1
+            await advanceBGM(generation: switchGeneration)
+        } else {
+            await step(by: 1)
+        }
     }
 
     /// Jumps to track 1 of the current playlist and plays it, becoming the new saved position.
+    /// While BGM is active, Reset instead restarts the *current* video from 0:00 (`AudioPlayer.
+    /// restart()`) — it doesn't pick a new video (Next already covers that), doesn't affect
+    /// `bgmHistory`/`bgmHistoryPosition`, and doesn't need a `switchGeneration` bump since it
+    /// isn't resolving anything new, just seeking what's already loaded.
     func reset() async {
+        if isBGMActive {
+            guard currentIndex != nil else { return }
+            player.restart()
+            isPlaying = true
+            return
+        }
+
         guard !tracks.isEmpty else { return }
 
         switchGeneration += 1
@@ -277,6 +646,12 @@ final class PlaybackController: ObservableObject {
     /// no matching preload is ready (still in flight, failed, or the immediate next track turns
     /// out to be unavailable).
     private func advanceOnFinish() async {
+        if isBGMActive {
+            switchGeneration += 1
+            await advanceBGM(generation: switchGeneration)
+            return
+        }
+
         guard !tracks.isEmpty, let current = currentIndex else { return }
 
         switchGeneration += 1

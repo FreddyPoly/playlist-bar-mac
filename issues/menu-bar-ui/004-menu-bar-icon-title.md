@@ -3,7 +3,7 @@ id: menu-bar-ui-004
 title: Menu bar icon + current track title
 status: done
 security: false
-owner: placeholder
+owner: agent
 depends_on: [playback-controller-001]
 spec_ref: "SPEC.md#ui-menu-bar-dropdown"
 ---
@@ -21,13 +21,13 @@ it, updating as the track changes.
 
 ## Notes
 
-**Placeholder:** SPEC.md specifies "icon + scrolling track title" but doesn't pin down the exact
-icon design. Built with the SF Symbol `music.note` as a placeholder icon — swap it (and/or a
-custom asset) in `PlaylistBarApp.swift`'s `Image(systemName:)` call (inside the label `HStack`,
-see the 2026-08-09 fix below) once you have a preference. Static truncated title, not actually
-scrolling — treated the scrolling behavior as a
-nice-to-have per the original issue's own note, since a static truncated title satisfies the
-spec's core requirement without the added complexity of a marquee animation.
+**Icon confirmed final (2026-08-10):** SPEC.md specifies "icon + scrolling track title" but
+didn't pin down the exact icon design, so this was built with the SF Symbol `music.note` as a
+placeholder pending a preference. Frederic confirmed the default `music.note` icon is fine as-is
+— no swap needed, so this is no longer an open placeholder (`owner` updated from `placeholder` to
+`agent` accordingly). Static truncated title, not actually scrolling — treated the scrolling
+behavior as a nice-to-have per the original issue's own note, since a static truncated title
+satisfies the spec's core requirement without the added complexity of a marquee animation.
 
 **Required refactor:** this issue needed the menu bar label and the dropdown to observe the *same*
 `PlaybackController` instance — otherwise switching playlists in the dropdown would never show up

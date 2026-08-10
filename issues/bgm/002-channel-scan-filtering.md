@@ -1,7 +1,7 @@
 ---
 id: bgm-002
 title: Channel scan with 15-minute / non-members-only filtering
-status: open
+status: done
 security: true
 owner: agent
 depends_on: [bgm-001]
@@ -46,3 +46,39 @@ the deadlock-avoidance (concurrent stdout/stderr draining) it already handles.
 
 Produces raw scanned+filtered results only — merging them into the persisted pool (preserving
 existing listen counts) is `bgm-003`, not this issue.
+
+## Implemented (2026-08-10)
+
+`Sources/PlaylistBar/BGMChannelScanner.swift`: `BGMChannelScanner.scan(channelURL:)` appends
+`/videos` to the given channel URL if not already present, runs
+`yt-dlp --flat-playlist -J <url>` via the existing `YtDlpRunner`, decodes entries (including
+`duration`/`availability`, which `PlaylistScanner`'s `FlatPlaylistEntry` doesn't need), and
+filters to `duration >= 900 && availability != "subscriber_only"`. An entry missing `id` or
+`duration` is dropped (can't be evaluated against the filter) rather than defaulted to eligible or
+ineligible. Returns `[BGMTrack]` (from `bgm-001`) with `listenCount`/`normalizationGain` at their
+defaults, since this is a fresh scan with no merge applied yet.
+
+**Verification**:
+- Synthetic edge cases via a standalone script: normal eligible video, `null` availability, an
+  `availability` key absent entirely, the exact 900s boundary (included, confirming `>=` not
+  `>`), 899s (excluded), `subscriber_only` on an otherwise-long video (excluded), an entry with no
+  `duration` (dropped, not defaulted), an entry with no `id` (dropped), and a short public video
+  (excluded). All passed.
+- **Live, against the real configured channel** (per this issue's own acceptance criteria): ran
+  the actual scan+filter logic against
+  `https://www.youtube.com/channel/UC_LtBDXXXqQiIBNO2NwEOPQ` (passed **without** a `/videos`
+  suffix, exercising the auto-append path) — 177 total entries, 101 eligible, all with
+  `duration >= 900`. Lower than the 106 seen during this feature's interview a short time earlier
+  — plausible real-world channel drift (a video or two's availability/duration/listing changed in
+  the interim), not a filter bug; the synthetic boundary tests above independently confirm the
+  filter logic itself is exactly `>= 900` and `!= "subscriber_only"`, matching the spec.
+- `swift build` succeeds with no warnings.
+
+**Review**: `/code-review` can't be invoked by the agent (`disable-model-invocation`). Tried
+`/security-review` (this issue is `security: true`) — it *is* agent-invocable, but its diff logic
+is hardcoded against `origin/HEAD`, which this repo doesn't have (no remote configured yet), so it
+failed outright rather than producing a review. Did a manual security-focused pass instead: the
+channel URL flows into an argument array (`YtDlpRunner.run(arguments:)`), never shell-interpolated;
+yt-dlp's JSON output (third-party data) is parsed via `Codable` with optional fields, never
+evaluated/executed; malformed output and non-zero exit codes surface as typed errors rather than
+crashing or corrupting state. Same posture already accepted for `playlist-data-002`. No findings.

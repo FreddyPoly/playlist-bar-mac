@@ -1,7 +1,7 @@
 ---
 id: bgm-004
 title: Fewest-listens / random-tiebreak selection algorithm
-status: open
+status: done
 security: false
 owner: agent
 depends_on: [bgm-001]
@@ -39,3 +39,24 @@ playback controller.
 The no-immediate-repeat rule (excluding the just-played video) and its "unless the pool would go
 empty" fallback were both explicit decisions from the interview for this feature — don't drop
 either half.
+
+## Implemented (2026-08-10)
+
+`Sources/PlaylistBar/BGMSelector.swift` — `BGMSelector.selectNext(from:excluding:)`: filters the
+pool down by `excludingVideoID` first (falling back to the full pool if that filter would empty
+it), finds the minimum `listenCount` among the remaining candidates, filters to just the ones
+tied at that minimum, and returns `.randomElement()` from that tied set (Swift's
+`Array.randomElement()` — uniform over the array, exactly the "uniform-random tiebreak" the spec
+calls for). `nil` only when `pool` itself is empty, checked before any filtering.
+
+**Verification**: standalone script covering every branch — empty pool → `nil`; a unique minimum
+is picked deterministically; a 3-way pool with two videos tied at the minimum and one clearly
+higher, sampled 500 times, both tied videos appear and the higher-count one never does (confirms
+both "minimum wins" and "tiebreak is genuinely random, not first-in-array"); excluding the current
+video across 200 samples never returns it while an alternative exists; a single-video pool still
+returns that video even when it's the one being excluded (the empty-pool fallback); excluding a
+video id that isn't even in the pool is a harmless no-op, leaving all real candidates eligible.
+All passed. `swift build` succeeds with no warnings.
+
+**Review**: manual pass in place of `/code-review` (see `bgm-002`'s Notes). Pure function, no I/O,
+no shared/mutable state — no findings.

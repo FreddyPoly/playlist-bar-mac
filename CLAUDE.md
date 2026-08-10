@@ -93,7 +93,21 @@ observable). Same PATH-hardening as `yt-dlp` above — see `FfmpegAvailability.s
   `Slider(value:in:)` between the transport controls and the track list (volume-control-002,
   2026-08-09) is the master-trim control — bound to `controller.masterVolume` via a get/set
   `Binding` (same pattern as `playlistSelection`), no numeric readout, flanked by two speaker SF
-  Symbols.
+  Symbols. **BGM picker entry** (`bgm-010`, 2026-08-10): the `Picker` gained a 5th row for
+  `PlaybackController.bgmPlaylist` after the 4 fixed playlists; `playlistSelection`'s `set`
+  branches on `newValue == PlaybackController.bgmPlaylist` to call `controller.switchToBGM()`
+  instead of `switchTo(playlist:)`. **BGM track list** (`bgm-011`, 2026-08-10): the track-list
+  `ScrollView` now branches on `controller.isBGMActive` — the BGM branch renders a new
+  `displayedBGMHistory` computed property (`bgmHistory[max(0, current-5)...current]`, where
+  `current = controller.bgmCurrentHistoryIndex` — up to 5 previous entries plus whichever one is
+  current, never anything "after" it, since BGM has no next-track concept), each row showing the
+  title (same accent/semibold highlight-if-current convention as the fixed-playlist list) plus the
+  track's local listen count in trailing secondary text, tapping a row calls
+  `controller.selectBGMHistoryEntry(at:)` (`bgm-007`). The non-BGM branch (`displayedTracks`) is
+  unchanged. Known simplification: a row's shown listen count is a snapshot from when it was
+  selected, not a live re-read of the pool, so the currently-playing track's count doesn't
+  visibly tick up in real time as `bgm-005`'s threshold is crossed mid-play — still accurate,
+  just not reactive for that one row.
 - `Sources/PlaylistBar/PlaybackController.swift` — the central `ObservableObject` tying
   everything together: `switchTo(playlist:)`, `previous()`/`next()` (wrap-around), `reset()`,
   `selectTrack(at:)`, `togglePlayPause()`, `setMasterVolume(_:)`, and finish-triggered
@@ -135,6 +149,52 @@ observable). Same PATH-hardening as `yt-dlp` above — see `FfmpegAvailability.s
   sets `currentIndex`/`isResolvingTrack`, and only cleared post-wait *after* the
   `switchGeneration` guard — reversed from an initial version that cleared it before the guard,
   which let a stale/superseded call clobber a newer call's genuinely-still-waiting state.
+  **BGM integration** (`bgm-006`, 2026-08-10): `switchToBGM()`, `advanceBGM(generation:)`, and
+  `playBGM(startingFrom:generation:)` add BGM support without a parallel state model — BGM's
+  "current track" is represented via the *same* `tracks`/`currentIndex` this file already uses (a
+  single-element `tracks` array, `currentIndex = 0`, `currentPlaylist` set to a synthetic
+  `Playlist(slug: "bgm", name: "BGM", url: "")`), which is what makes Now Playing info, the menu
+  bar title, and `applyEffectiveVolume()`/`currentTrackGain` all work for BGM with zero changes to
+  any of them. `isBGMActive` is computed from `currentPlaylist?.slug`, never a separate flag.
+  `next()`/`advanceOnFinish()` branch to `advanceBGM` (which excludes the current track via
+  `BGMSelector` — see `BGMSelector.swift` above); `previous()`/`reset()` are guarded no-ops while
+  BGM is active for now (`bgm-007`/`bgm-008` will replace these — letting the old index-based
+  logic run against BGM's one-element `tracks` array would silently bypass `BGMCacheStore`'s gain
+  persistence, `bgmHistory`, and `bgmListenTracker`). `playBGM` has its own bounded
+  retry-on-unavailable loop (mirroring `TrackAvailabilityResolver`) and its own bounded loudness
+  wait, `measureBGMGain(url:timeout:)` — a standalone continuation-race (not
+  `LoudnessGainCoordinator`, which is hardcoded to persist via `PlaylistCacheStore` and would've
+  silently discarded every BGM measurement; caught during design, before writing code, by actually
+  reading that type's persistence call). No BGM-specific next-track preloader exists yet — BGM's
+  next pick isn't decided until needed, so auto-advance has a real (usually brief) resolution gap
+  unlike the fixed playlists' gapless transition; a disclosed gap, not silently absorbed. See
+  `bgm-006`'s own Notes for the full list of scope decisions made here. **Real Previous/history**
+  (`bgm-007`, 2026-08-10) replaced the guarded no-op: `bgmHistoryPosition: Int?` (`nil` = live
+  edge) drives `previousBGM()`/`selectBGMHistoryEntry(at:)`, both replaying via `playBGM`'s new
+  `appendToHistory: Bool` parameter (`false` for a history replay, since the track's already in
+  `bgmHistory`). `advanceBGM` (Next/auto-advance) truncates any "forward" history and resets the
+  position before making its next fresh pick, per SPEC's discard-not-redo rule. **`reset()`'s BGM
+  branch** (`bgm-008`, 2026-08-10) replaced an earlier guarded no-op: calls the new
+  `AudioPlayer.restart()`, sets `isPlaying = true`, no `switchGeneration` bump (nothing async is
+  resolving) and no history/persistence change — it's the same track, just seeked back to 0:00.
+  **`restoreBGMSession()`** (`bgm-009`, 2026-08-10), called from `restoreLastSession()` when the
+  saved slug is `"bgm"`: loads the pool and displays the persisted last-played video (or a fresh
+  `BGMSelector` pick) via `tracks`/`currentIndex`, seeding `bgmHistory` with it — but never calls
+  `player.load`/sets `isPlaying`, matching the fixed playlists' restore-without-autoplay contract.
+  This also closed a gap `bgm-006` had flagged: `togglePlayPause()`'s fallback branch (for
+  `currentIndex` set but `hasLoadedCurrentTrack` false — the exact state a BGM restore produces,
+  and the only way that state becomes reachable for BGM) now branches on `isBGMActive` to route
+  through `playBGM(...,appendToHistory: false)` instead of the fixed-playlist `play(startingAt:)`,
+  which would have silently fed a BGM track through `LoudnessGainCoordinator`/`NextTrackPreloader`
+  and discarded its gain measurement (see `bgm-006`'s Notes on why those can't be reused for BGM).
+  **`Self.bgmPlaylist`** (`bgm-010`, 2026-08-10): a single shared static `Playlist` constant for
+  BGM's synthetic playlist value, replacing two independently-constructed literals in
+  `switchToBGM()`/`restoreBGMSession()` — `Playlist`'s equality is field-based, so the picker's
+  selection-tag comparison in `ContentView.swift` needed one definitively-shared value, not two
+  literals that merely happened to match. **`bgmCurrentHistoryIndex: Int?`** (`bgm-011`,
+  2026-08-10): `bgmHistoryPosition` if set, else the live edge (`bgmHistory.count - 1`) — exposed
+  so `ContentView.swift`'s BGM track list doesn't need to know about the private
+  `bgmHistoryPosition` implementation detail.
 - `Sources/PlaylistBar/Playlists.swift` — `Playlist` model and `FixedPlaylists.all`, the app's 4
   fixed playlists (slug/name/URL) transcribed from SPEC.md.
 - `Sources/PlaylistBar/PlaylistLoader.swift` — `PlaylistLoader`, cache-first playlist loading:
@@ -154,6 +214,61 @@ observable). Same PATH-hardening as `yt-dlp` above — see `FfmpegAvailability.s
   `PlaylistCacheStore.setNormalizationGain(_:forVideoID:playlistSlug:)` updates one track in place
   without a full re-scan. Backward-compatible: a cache file written before this field existed
   decodes it as `nil` automatically (verified via a standalone script).
+- `Sources/PlaylistBar/BGMCache.swift` — `BGMTrack`/`BGMPoolCache`/`BGMCacheStore` (`bgm-001`,
+  2026-08-10), the BGM feature's equivalent of `PlaylistCache.swift` above, persisted separately
+  as `bgm-pool.json` under the same Application Support directory. `BGMTrack` adds a
+  `listenCount` (local-only play count, drives BGM's fewest-listens selection — see SPEC.md's
+  "BGM channel playback") alongside a `normalizationGain` field mirroring `CachedTrack`'s, since
+  BGM videos get the same loudness normalization as regular tracks with no separate cache to put
+  it in. Deliberately carries no per-track "which channel" field — SPEC.md's BGM pool is one
+  shared selection space across every configured channel (currently one), not one entry per
+  channel, so channel origin isn't needed here. `BGMCacheStore.merge(freshlyScanned:into:)` is
+  the key divergence from `PlaylistCacheStore`: a 24h rescan (once wired up by `bgm-003`) must
+  preserve each still-eligible video's `listenCount`/`normalizationGain` by video id rather than
+  replacing the whole track list the way `PlaylistLoader`'s rescan does — a full replace would
+  silently reset every video's listen count every 24 hours, defeating the feature. Same
+  copy-mutate-reconstruct-save pattern as `PlaylistCacheStore.setNormalizationGain` (immutable
+  `let` struct fields, not mutated in place) — an early draft used `var` fields and in-place
+  mutation instead; caught and fixed during this issue's own self-review for consistency with the
+  established convention.
+- `Sources/PlaylistBar/BGMChannelScanner.swift` — `BGMChannelScanner.scan(channelURL:)`
+  (`bgm-002`, 2026-08-10), a channel-scanning sibling to `PlaylistScanner.scan(playlistURL:)`:
+  scans a channel's `/videos` tab (appends `/videos` to the given URL if not already present) via
+  the same `yt-dlp --flat-playlist -J` + `YtDlpRunner` mechanism, but additionally decodes and
+  filters on `duration`/`availability` (which a plain playlist scan doesn't need) — confirmed live
+  that yt-dlp's flat-playlist output already reports both fields per entry for a channel's videos
+  tab, so no extra per-video resolution calls are needed. Eligibility: `duration >= 900` (15 min)
+  and `availability != "subscriber_only"` (members-only marker). Returns fresh `BGMTrack`s (see
+  `BGMCache.swift` above) with `listenCount`/`normalizationGain` at their defaults — merging
+  against the existing pool to preserve those is `bgm-003`'s job, not this scan.
+- `Sources/PlaylistBar/BGMChannels.swift` — `BGMChannels.all: [String]` (`bgm-003`, 2026-08-10),
+  the configured BGM channel URL list (currently one), mirroring `FixedPlaylists.all`'s hardcoded
+  convention — no in-app UI to edit it.
+- `Sources/PlaylistBar/BGMLoader.swift` — `BGMLoader` (`bgm-003`, 2026-08-10), a structural mirror
+  of `PlaylistLoader`: cache-first via `BGMCacheStore`, background refresh only when stale (same
+  24h threshold). The refresh scans every `BGMChannels.all` entry, pools+dedupes across channels
+  by video id, and — the key divergence from `PlaylistLoader` — merges the result against the
+  existing on-disk pool via `BGMCacheStore.merge` rather than replacing it, so listen counts and
+  normalization gain survive a rescan. A failed scan leaves the existing pool untouched, same
+  "don't let a broken refresh take away a working cache" rule as `PlaylistLoader`.
+- `Sources/PlaylistBar/BGMSelector.swift` — `BGMSelector.selectNext(from:excluding:)` (`bgm-004`,
+  2026-08-10), the pure fewest-listens/random-tiebreak selection function: filters out the
+  excluded (just-played) video unless that would empty the pool, finds the minimum `listenCount`
+  among what's left, and returns a uniformly-random pick among whichever videos are tied at that
+  minimum. `nil` only for a genuinely empty pool. No I/O, no persistence — mirrors this codebase's
+  existing convention of isolating selection logic (see `TrackAvailabilityResolver`) as directly
+  testable pure functions.
+- `Sources/PlaylistBar/BGMListenTracker.swift` — `BGMListenTracker` (`bgm-005`, 2026-08-10):
+  `start(videoID:duration:currentTime:)` arms a 1Hz `Timer` (same pattern as `AudioPlayer`'s own
+  end-of-track watchdog — `Timer` + `RunLoop.main.add(_:forMode:)` + a `Task { @MainActor in }`
+  hop, since a `Timer` callback isn't itself actor-isolated) that, once `currentTime()` crosses
+  `min(30, duration * 0.2)`, calls `BGMCacheStore.incrementListenCount(forVideoID:)` exactly once
+  and stops. `cancel()` stops without incrementing; `start()` always cancels any prior in-flight
+  tracking first. **Wiring requirement for whatever calls this** (`bgm-006`): switching away from
+  BGM to a fixed playlist must explicitly call `cancel()` — `start()`'s auto-cancel only covers
+  switching *between* BGM videos, so a still-armed tracker left running after leaving BGM would
+  keep polling `AudioPlayer.currentTime` against whatever's now loaded and could misattribute a
+  listen to a video that's no longer playing.
 - `Sources/PlaylistBar/StreamResolver.swift` — `StreamResolver.resolve(videoID:)`, resolves a
   playable `bestaudio[ext=m4a]/bestaudio` stream URL via yt-dlp for one video, distinguishing
   genuinely unavailable videos (best-effort message matching) from other failures. Deliberately
@@ -175,7 +290,15 @@ observable). Same PATH-hardening as `yt-dlp` above — see `FfmpegAvailability.s
   playing-vs-waiting signal rather than reinventing stall detection), mirrored onto
   `PlaybackController.isBuffering` via a `setOnBufferingChange` closure callback (same convention
   as `setOnFinish` — this codebase doesn't use Combine `.sink`/`AnyCancellable` anywhere). Ready
-  for `menu-bar-ui-006` to display; not itself what fixes the bug below.
+  for `menu-bar-ui-006` to display; not itself what fixes the bug below. Also exposes `currentTime:
+  Double` (`bgm-005`, 2026-08-10), a thin `CMTimeGetSeconds(player.currentTime())` pass-through —
+  added so `BGMListenTracker` can observe playback progress without `AudioPlayer` needing to know
+  why, reusing the same underlying `AVPlayer` state as the end-of-track watchdog below rather than
+  a second competing notion of position. `restart()` (`bgm-008`, 2026-08-10) —
+  `player.seek(to: .zero)` + the existing `play()`, resetting `hasFiredFinishForCurrentItem` too —
+  used by BGM's Reset, which restarts the *current* item rather than resolving a new one. Verified
+  live against a real resolved stream: seeks genuinely back near 0 (not just continuing forward)
+  and resumes advancing afterward with `rate == 1.0`.
   **The real bug, found while implementing playback-engine-005 (2026-08-09):** YouTube serves
   resolved audio as a progressively-streamed, "not optimized" (moov-atom-at-end) M4A, so
   `AVFoundation` estimates duration before it can read the real one — reproducibly **~2x too
@@ -268,10 +391,11 @@ playback failure in `StreamResolver` and the `SMAppService` bundle-identity requ
 
 ## Status
 
-All 36 issues across 9 features are implemented (`issues/volume-control/` grew from 2 to 8 issues
-on 2026-08-09 to cover automatic loudness normalization — see below — and all 8 are now done); QC
-(the `qc` skill's human test pass against `issues/FEATURES.md`) is in progress, started
-2026-08-09:
+All 36 issues across the original 9 features are implemented (`issues/volume-control/` grew from 2
+to 8 issues on 2026-08-09 to cover automatic loudness normalization — see below — and all 8 are
+now done); QC (the `qc` skill's human test pass against `issues/FEATURES.md`) is in progress,
+started 2026-08-09. A 10th feature, **bgm**, was added 2026-08-10 (11 issues, in progress — see
+its own entry below) and isn't part of that QC pass yet.
 
 - **app-shell**: `qc-passed`.
 - **playlist-data**: `qc-passed` (2026-08-09). Full pass against the real playlists: cache-first
@@ -329,6 +453,23 @@ on 2026-08-09 to cover automatic loudness normalization — see below — and al
   banner (like `menu-bar-ui-005`'s yt-dlp one) or just silently degrade (every track plays
   unnormalized) was deliberately left an open question in `volume-control-003`'s Notes, not
   decided — currently it silently degrades, which may or may not be the right call.
+- **bgm**: `ready-for-qc`, 11/11 done — added 2026-08-10 (see SPEC.md's "BGM channel playback"), a
+  5th playlist-picker entry that plays random 15+ minute, non-members-only videos from a pool of
+  YouTube channels, weighted toward whichever's been listened to least locally. All 11 issues are
+  implemented — see the `Layout` entries above (`BGMCache.swift`, `BGMChannelScanner.swift`,
+  `BGMChannels.swift`/`BGMLoader.swift`, `BGMSelector.swift`, `BGMListenTracker.swift` +
+  `AudioPlayer.currentTime`/`restart()`, `PlaybackController.swift`'s BGM integration, and
+  `ContentView.swift`'s picker/track-list entries) for what each piece does and the scope
+  decisions made along the way. **Never yet QC'd** — verification so far has been standalone
+  scripts (real live checks for the channel scan, the `Timer`/`RunLoop` mechanics, and
+  `AudioPlayer.restart()` against a real resolved stream; fake-injected control-flow scripts for
+  the rest) plus confirming the real app launches without crashing after each UI change — no
+  actual interactive run-through exists yet, consistent with this project's "visual/interactive
+  verification needs the user" limitation (see "Known gaps" below). `bgm-006`'s Notes list the
+  deliberate scope decisions worth knowing before QC: no BGM-specific next-track preloader (a
+  real, if usually brief, resolution gap on auto-advance, unlike the fixed playlists' gapless
+  transition), and a simplified (non-preload-sharing, non-retroactively-cached) loudness-gain
+  wait.
 
 Known gaps worth knowing about, not blockers:
 - **Visual/interactive UI verification turned out to be possible after all**, just not via
@@ -337,10 +478,18 @@ Known gaps worth knowing about, not blockers:
   the user driving the real running app directly and reporting/screenshotting what they see. This
   is exactly how the two menu-bar-ui bugs above were found: state was always correct
   (confirmed via temporary debug prints), the bugs were purely in what actually rendered.
-- **No git repository yet** — `/code-review` and `/security-review` can't run automatically until
-  one exists; manual review notes are recorded in each issue file instead. One real finding *was*
-  caught via manual `/code-review` (the PATH-resolution issue in `YtDlpAvailability.swift`,
-  now fixed) — a real automated pass might catch more.
+- **A git repository now exists** (initialized 2026-08-10, no remote yet), but neither automated
+  review command works from here yet, for two different reasons: `/code-review` is reserved for
+  explicit user invocation — an agent can't invoke it via the Skill tool
+  (`disable-model-invocation`) — while `/security-review` *is* agent-invocable but its diff logic
+  is hardcoded against `origin/HEAD`, which fails outright with no remote configured (confirmed by
+  trying it during `bgm-002`). Adding a remote isn't something to do unilaterally just to unblock
+  this. All issues implemented so far, including every `bgm-*` one, are still going through a
+  manual self-review pass instead, noted in each issue's own Notes. One real finding *was* caught
+  via manual review pre-git (the PATH-resolution issue in `YtDlpAvailability.swift`, now fixed) —
+  running the real `/code-review` command yourself over the current diff, and setting up a remote
+  so `/security-review` can run too, would likely catch
+  more than the manual passes have.
 - **System media-key/Control Center testing is unverified** — `MPRemoteCommandCenter` targets are
   confirmed registered and enabled, but an actual F7/F8/F9 press wasn't simulated (no way to do
   so without Accessibility/hardware access).

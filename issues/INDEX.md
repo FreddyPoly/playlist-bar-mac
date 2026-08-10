@@ -23,7 +23,7 @@
 | menu-bar-ui-001 | Playlist selector dropdown | done | false | agent | playback-controller-001 |
 | menu-bar-ui-002 | Transport controls | done | false | agent | playback-controller-002, playback-controller-003 |
 | menu-bar-ui-003 | Track list (previous 5 / current / next 5) | done | false | agent | playback-controller-005, playlist-data-003 |
-| menu-bar-ui-004 | Menu bar icon + current track title | done ⚠️ placeholder | false | placeholder | playback-controller-001 |
+| menu-bar-ui-004 | Menu bar icon + current track title | done | false | agent | playback-controller-001 |
 | menu-bar-ui-005 | yt-dlp missing / unavailable messaging | done | false | agent | app-shell-003, playlist-data-002, playback-engine-001 |
 | menu-bar-ui-006 | Loading/buffering visual feedback across all wait moments | done | false | agent | playback-controller-001, playback-engine-005 |
 | startup-001 | Launch-at-Login toggle | done | false | agent | app-shell-001 |
@@ -38,14 +38,14 @@
 | volume-control-006 | Fold loudness analysis into next-track preloading | done | false | agent | volume-control-003, volume-control-004 |
 | volume-control-007 | Bounded wait for loudness analysis on out-of-order jumps | done | false | agent | volume-control-003, volume-control-004, volume-control-005 |
 | volume-control-008 | Surface loudness-analysis wait in existing loading/buffering feedback | done | false | agent | volume-control-007 |
-| bgm-001 | BGM track cache schema & storage | open | false | agent | |
-| bgm-002 | Channel scan with 15-minute / non-members-only filtering | open | true | agent | bgm-001 |
-| bgm-003 | Cache-first pooled load with listen-count-preserving 24h refresh | open | false | agent | bgm-002 |
-| bgm-004 | Fewest-listens / random-tiebreak selection algorithm | open | false | agent | bgm-001 |
-| bgm-005 | Listen-count increment on playback threshold | open | false | agent | bgm-001, playback-engine-002 |
-| bgm-006 | BGM switch-to + Next selection orchestration | open | false | agent | bgm-003, bgm-004, bgm-005, playback-controller-001 |
-| bgm-007 | Session-only Previous history navigation | open | false | agent | bgm-006 |
-| bgm-008 | Reset restarts the current BGM video instead of jumping | open | false | agent | bgm-006 |
-| bgm-009 | Restore last-played BGM video on relaunch without auto-play | open | false | agent | bgm-006, startup-002 |
-| bgm-010 | "BGM" entry in the playlist selector dropdown | open | false | agent | bgm-006, menu-bar-ui-001 |
-| bgm-011 | BGM track list — history + current, no "next" slot | open | false | agent | bgm-005, bgm-006, bgm-007 |
+| bgm-001 | BGM track cache schema & storage | done | false | agent | |
+| bgm-002 | Channel scan with 15-minute / non-members-only filtering | done | true | agent | bgm-001 |
+| bgm-003 | Cache-first pooled load with listen-count-preserving 24h refresh | done | false | agent | bgm-002 |
+| bgm-004 | Fewest-listens / random-tiebreak selection algorithm | done | false | agent | bgm-001 |
+| bgm-005 | Listen-count increment on playback threshold | done | false | agent | bgm-001, playback-engine-002 |
+| bgm-006 | BGM switch-to + Next selection orchestration | done | false | agent | bgm-003, bgm-004, bgm-005, playback-controller-001 |
+| bgm-007 | Session-only Previous history navigation | done | false | agent | bgm-006 |
+| bgm-008 | Reset restarts the current BGM video instead of jumping | done | false | agent | bgm-006 |
+| bgm-009 | Restore last-played BGM video on relaunch without auto-play | done | false | agent | bgm-006, startup-002 |
+| bgm-010 | "BGM" entry in the playlist selector dropdown | done | false | agent | bgm-006, menu-bar-ui-001 |
+| bgm-011 | BGM track list — history + current, no "next" slot | done | false | agent | bgm-005, bgm-006, bgm-007 |
