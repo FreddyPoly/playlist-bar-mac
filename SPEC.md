@@ -10,6 +10,10 @@ Mac menu bar player for them — not a browser tab, not a web app. Core needs: f
 between playlists (some are 2000+ tracks), resuming each playlist where it was left off, and
 basic transport controls, all running locally with no backend/account of any kind.
 
+A 5th entry, **BGM**, was added 2026-08-10 (see "BGM channel playback" below) — instead of one
+fixed ordered playlist, it plays random long-form videos from a pool of YouTube channels,
+weighted toward whichever video has been listened to least locally.
+
 ## Fixed playlists
 
 - Rock3 — `https://www.youtube.com/playlist?list=PLfT09cdpUEa-Wsl0GD-_u3_Fk9TMCRBpk` (~2300 tracks)
@@ -19,6 +23,50 @@ basic transport controls, all running locally with no backend/account of any kin
 
 All 4 are public playlists — no YouTube sign-in or cookies required to read or play them.
 These 4 URLs are hardcoded; there is no UI to add/remove/edit playlists.
+
+The playlist picker has a 5th entry, **BGM**, which is not one of these 4 ordered playlists —
+see "BGM channel playback" below.
+
+## BGM channel playback
+
+Added 2026-08-10. Unlike the 4 fixed playlists (one ordered list each), BGM draws from a **pool
+of one or more YouTube channels** — currently just one:
+
+- Deep Emotion BGM — `https://www.youtube.com/channel/UC_LtBDXXXqQiIBNO2NwEOPQ` (real check via
+  `yt-dlp --flat-playlist` on its `/videos` tab: 177 videos total, 106 qualify under the filter
+  below)
+
+Built so a second channel can later be added into the **same shared pool** (one "BGM" entry
+drawing from all configured channels combined, deduped by video id) rather than becoming its own
+separate picker entry — a deliberate choice over one-picker-entry-per-channel.
+
+- **Sourcing**: each channel's `/videos` tab is scanned via `yt-dlp --flat-playlist`, same
+  mechanism as the 4 fixed playlists (see "Playlist data & caching"). Confirmed live: this scan
+  already returns `duration` and an `availability` field per entry — no extra per-video calls
+  needed to filter.
+- **Filtering**: a video qualifies for the pool if `duration >= 900` seconds (15 minutes) and
+  `availability != "subscriber_only"` (excludes members-only videos — this is the real marker
+  yt-dlp reports for them).
+- **Selection algorithm**: picking a video = whichever qualifying video has the **fewest local
+  listens** wins; a uniform-random pick breaks ties among videos sharing the minimum count. The
+  video that was just playing is excluded from that immediate next pick even if it's still tied
+  for fewest listens (so it can't repeat back-to-back) — falling back to including it only if
+  excluding it would leave the pool empty.
+- **What counts as a "listen"**: a qualifying video's local listen count increments once
+  continuous playback of it passes `min(30s, 20% of its duration)` — long enough that an
+  accidental skip doesn't inflate the count, short enough not to require finishing a 20-minute
+  track. Local to this player only; nothing is reported to YouTube or anywhere else.
+- **Caching & merge**: channel scans are cached and refreshed on the same 24h-staleness pattern
+  as the 4 fixed playlists (see "Playlist data & caching"), but — unlike that cache, which fully
+  replaces its track list on every rescan — a BGM rescan **merges** by video id: local listen
+  counts (and normalization gain) for videos still present after a rescan are preserved, not
+  reset. This is a deliberate deviation from the fixed-playlist cache behavior, since losing
+  listen counts on every 24h refresh would defeat the feature.
+- **Navigation is different from the 4 fixed playlists** (no fixed order, so index-based
+  wrap-around doesn't apply) — see "Behavior rules" below.
+- Master volume trim and per-track loudness normalization (see "Volume & loudness normalization")
+  apply to BGM videos exactly as they do to regular playlist tracks — same pipeline, same
+  per-video cached gain, no special-casing.
 
 ## Platform & stack
 
@@ -115,13 +163,20 @@ Stored locally (JSON, in the same Application Support directory), no database, n
 - Master volume trim (app-wide, not per-playlist) — persists across quit/relaunch like the rest
   of this state. Added 2026-08-09. Per-track normalization gain is separate persisted state, kept
   in the playlist cache rather than here — see "Volume & loudness normalization" above.
+- **BGM**, added 2026-08-10: last-played video (id) is persisted the same way as the 4 fixed
+  playlists' last-played track, so relaunch restores and displays it (without auto-playing — see
+  "Startup / Login item") rather than picking fresh. Each pooled video's local listen count is
+  also persisted (alongside its cached channel-scan entry — see "BGM channel playback"). The
+  **session Previous history** (the list of videos actually played this run, used to walk
+  backward — see "Behavior rules") is **not** persisted; it starts empty on every launch.
 
 ## UI (menu bar dropdown)
 
 - Menu bar item shows a small icon **plus the current track title** (truncated as needed).
 - Dropdown contains:
-  - Playlist selector (dropdown of the 4 fixed playlists by name).
-  - Transport controls: **Previous / Play-Pause / Next / Reset**.
+  - Playlist selector (dropdown of the 4 fixed playlists plus **BGM**, by name).
+  - Transport controls: **Previous / Play-Pause / Next / Reset** — same buttons for BGM, but see
+    "Behavior rules" below for how their meaning differs there.
   - Volume slider — a **master trim**, attenuating this app's own audio output independently of
     the system/macOS volume (layered on top of it, doesn't touch system volume or other apps'
     audio). Added 2026-08-09: native macOS volume alone wasn't enough headroom for comfortable
@@ -132,6 +187,13 @@ Stored locally (JSON, in the same Application Support directory), no database, n
   - Track list: current track, up to 5 previous and up to 5 next (by playlist index — not play
     history), each an entry that starts playback immediately when clicked. Fewer than 5 are
     shown near either end of the playlist (no wrapping *in the list display*, see below).
+    **BGM's list is different** (added 2026-08-10, decided after discussion — a full catalog of
+    all ~106 qualifying videos wouldn't help pick one, and "5 next" is meaningless when the next
+    pick isn't determined yet): shows up to 5 **previously-played videos this session** (real
+    history, not catalog order — click any to jump back to it, same interaction as the regular
+    list) plus the current track highlighted. No "next" slot at all. Each visible BGM entry
+    (history + current) shows its local listen count next to the title, so the
+    fewest-listens-wins selection is visible rather than a black box.
   - No duration display, no seek/progress bar — just title + play/pause state.
   - Loading/buffering feedback — a visible state (not just a static Play/Pause icon) whenever
     audio isn't actually flowing but the app is working on it: switching playlists (cache scan in
@@ -160,6 +222,21 @@ Stored locally (JSON, in the same Application Support directory), no database, n
 - **Clicking a track** in the previous/next list jumps directly to it and plays immediately,
   updating the saved position.
 - Only one playlist plays at a time; switching stops whatever was previously playing.
+- **BGM's transport rules are different** (added 2026-08-10), since there's no fixed track order
+  to step through:
+  - **Next** (button, or auto-advance when a video finishes): picks a new video via BGM's
+    fewest-listens/random-tiebreak selection (see "BGM channel playback"), appends it to the
+    session history, and starts it.
+  - **Previous**: walks backward through the session's actual play history (like a browser back
+    button) and plays that video — a no-op if there's no earlier history yet (e.g. right after
+    switching to BGM). Clicking a history entry in the track list behaves the same as navigating
+    back to that point.
+  - **Reset**: restarts the *current* video from 0:00 — it does **not** pick a new video (Next
+    already covers that) and does not affect history.
+  - If Previous has been used to step back through history and **Next** is then pressed, it
+    always picks a fresh weighted-random video rather than redoing forward through history —
+    anything "ahead" in the history at that point is discarded, not replayed.
+  - Unavailable-video auto-skip still applies the same as the 4 fixed playlists.
 
 ## Startup / Login item
 
@@ -176,8 +253,12 @@ Stored locally (JSON, in the same Application Support directory), no database, n
 
 ## Explicitly out of scope
 
-- No support for playlists beyond the 4 fixed ones; no add/remove/reorder UI.
-- No shuffle mode, no repeat-single-track mode (only whole-playlist looping via wrap-around).
+- No support for playlists beyond the 4 fixed ones and BGM; no UI to add/remove/edit the 4 fixed
+  playlists (BGM's channel pool is likewise hardcoded in source for now — no in-app UI to add a
+  channel, even though the underlying model is structured to support more than one).
+- No shuffle mode, no repeat-single-track mode for the 4 fixed playlists (only whole-playlist
+  looping via wrap-around) — this doesn't apply to BGM, whose whole point is randomized selection;
+  see "BGM channel playback".
 - No duration/seek bar.
 - No account/sign-in of any kind.
 - No sync across machines — this is single-Mac, local-only.
@@ -187,8 +268,8 @@ Stored locally (JSON, in the same Application Support directory), no database, n
 
 Low risk, small surface:
 
-- **No authentication, no accounts, no OAuth** — all 4 playlists are public; nothing in the app
-  ever touches Frederic's YouTube account or credentials.
+- **No authentication, no accounts, no OAuth** — all 4 playlists and the BGM channel(s) are
+  public; nothing in the app ever touches Frederic's YouTube account or credentials.
 - **No secrets or API keys** — the yt-dlp approach was specifically chosen to avoid needing a
   YouTube Data API key or any Google Cloud credential.
 - **No untrusted user input** — the only external data is public YouTube playlist metadata
@@ -198,7 +279,15 @@ Low risk, small surface:
 - **Local data sensitivity**: cached playlist listings and last-played-track state are stored
   unencrypted under `~/Library/Application Support/PlaylistBar/`. This is not sensitive data
   (just video IDs/titles of playlists Frederic already plays), so no encryption/Keychain use is
-  warranted.
+  warranted. BGM's per-video local listen counts (added 2026-08-10) are the same kind of data —
+  video ids and play counts, nothing that identifies Frederic beyond what the rest of the app's
+  local state already does — stored the same unencrypted way; confirmed with Frederic as an
+  acceptable risk level with no extra protection needed.
+- **BGM channel scanning** (added 2026-08-10): uses the same `yt-dlp --flat-playlist` mechanism,
+  same trust boundary, and same public/read-only access as the 4 fixed playlists — no new
+  authentication surface. Filtering out members-only ("subscriber_only") videos relies on that
+  public availability marker yt-dlp already reports; the app never signs in or attempts to access
+  members-only content itself.
 - **Supply chain**: yt-dlp and ffmpeg are both installed by the user directly via Homebrew (not
   auto-downloaded or auto-updated by the app), keeping binary installation under the user's
   explicit control. The app only ever shells out to the already-installed binaries on PATH.
