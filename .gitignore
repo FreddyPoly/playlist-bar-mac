@@ -2,3 +2,4 @@
 .swiftpm/
 dist/
 *.xcodeproj
+.DS_Store
