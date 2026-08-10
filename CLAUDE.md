@@ -159,16 +159,26 @@ observable). Same PATH-hardening as `yt-dlp` above — see `FfmpegAvailability.s
   `next()`/`advanceOnFinish()` branch to `advanceBGM` (which excludes the current track via
   `BGMSelector` — see `BGMSelector.swift` above); `previous()`/`reset()` are guarded no-ops while
   BGM is active for now (`bgm-007`/`bgm-008` will replace these — letting the old index-based
-  logic run against BGM's one-element `tracks` array would silently bypass `BGMCacheStore`'s gain
-  persistence, `bgmHistory`, and `bgmListenTracker`). `playBGM` has its own bounded
-  retry-on-unavailable loop (mirroring `TrackAvailabilityResolver`) and its own bounded loudness
-  wait, `measureBGMGain(url:timeout:)` — a standalone continuation-race (not
+  logic run against BGM's one-element `tracks` array would silently bypass `BGMCacheStore`'s
+  listen-count persistence, `bgmHistory`, and `bgmListenTracker`). `playBGM` has its own bounded
+  retry-on-unavailable loop (mirroring `TrackAvailabilityResolver`). No BGM-specific next-track
+  preloader exists yet — BGM's next pick isn't decided until needed, so auto-advance has a real
+  (usually brief) resolution gap unlike the fixed playlists' gapless transition; a disclosed gap,
+  not silently absorbed. See `bgm-006`'s own Notes for the full list of scope decisions made here.
+  **Startup-latency fix (2026-08-10)**: `playBGM` originally had its own bounded loudness-analysis
+  wait, `measureBGMGain(url:timeout:)` (a standalone continuation-race, deliberately not
   `LoudnessGainCoordinator`, which is hardcoded to persist via `PlaylistCacheStore` and would've
-  silently discarded every BGM measurement; caught during design, before writing code, by actually
-  reading that type's persistence call). No BGM-specific next-track preloader exists yet — BGM's
-  next pick isn't decided until needed, so auto-advance has a real (usually brief) resolution gap
-  unlike the fixed playlists' gapless transition; a disclosed gap, not silently absorbed. See
-  `bgm-006`'s own Notes for the full list of scope decisions made here. **Real Previous/history**
+  silently discarded every BGM measurement). QC found that selecting BGM could get stuck on a
+  loading spinner for *minutes* despite that 5s bound working correctly — root cause was `AVPlayer`
+  itself being slow to become ready-to-play for BGM's long (15 min–1 hr+), `moov`-atom-at-end
+  audio-only streams, unrelated to anything in this file. Fix: `playBGM` now resolves via
+  `StreamResolver.resolve(videoID:preferProgressive: true)` (a faststart format instead — see
+  `StreamResolver.swift` above) and no longer measures loudness for BGM at all — the whole
+  `measureBGMGain` call and function were deleted; BGM tracks always construct with
+  `normalizationGain: nil`, which `currentTrackGain` already treats as `1.0`. Full investigation
+  and decisions in `issues/bgm/006-switch-and-next-orchestration.md`'s "QC feedback" and "Fix"
+  notes, and SPEC.md's "BGM channel playback" — "Startup latency for long videos". **Real
+  Previous/history**
   (`bgm-007`, 2026-08-10) replaced the guarded no-op: `bgmHistoryPosition: Int?` (`nil` = live
   edge) drives `previousBGM()`/`selectBGMHistoryEntry(at:)`, both replaying via `playBGM`'s new
   `appendToHistory: Bool` parameter (`false` for a history replay, since the track's already in
@@ -216,21 +226,24 @@ observable). Same PATH-hardening as `yt-dlp` above — see `FfmpegAvailability.s
   decodes it as `nil` automatically (verified via a standalone script).
 - `Sources/PlaylistBar/BGMCache.swift` — `BGMTrack`/`BGMPoolCache`/`BGMCacheStore` (`bgm-001`,
   2026-08-10), the BGM feature's equivalent of `PlaylistCache.swift` above, persisted separately
-  as `bgm-pool.json` under the same Application Support directory. `BGMTrack` adds a
-  `listenCount` (local-only play count, drives BGM's fewest-listens selection — see SPEC.md's
-  "BGM channel playback") alongside a `normalizationGain` field mirroring `CachedTrack`'s, since
-  BGM videos get the same loudness normalization as regular tracks with no separate cache to put
-  it in. Deliberately carries no per-track "which channel" field — SPEC.md's BGM pool is one
+  as `bgm-pool.json` under the same Application Support directory. `BGMTrack` has a `listenCount`
+  (local-only play count, drives BGM's fewest-listens selection — see SPEC.md's "BGM channel
+  playback"). Deliberately carries no per-track "which channel" field — SPEC.md's BGM pool is one
   shared selection space across every configured channel (currently one), not one entry per
   channel, so channel origin isn't needed here. `BGMCacheStore.merge(freshlyScanned:into:)` is
-  the key divergence from `PlaylistCacheStore`: a 24h rescan (once wired up by `bgm-003`) must
-  preserve each still-eligible video's `listenCount`/`normalizationGain` by video id rather than
-  replacing the whole track list the way `PlaylistLoader`'s rescan does — a full replace would
-  silently reset every video's listen count every 24 hours, defeating the feature. Same
-  copy-mutate-reconstruct-save pattern as `PlaylistCacheStore.setNormalizationGain` (immutable
-  `let` struct fields, not mutated in place) — an early draft used `var` fields and in-place
-  mutation instead; caught and fixed during this issue's own self-review for consistency with the
-  established convention.
+  the key divergence from `PlaylistCacheStore`: a 24h rescan (`bgm-003`) must preserve each
+  still-eligible video's `listenCount` by video id rather than replacing the whole track list the
+  way `PlaylistLoader`'s rescan does — a full replace would silently reset every video's listen
+  count every 24 hours, defeating the feature. Same copy-mutate-reconstruct-save pattern as
+  `PlaylistCacheStore.setNormalizationGain` (immutable `let` struct fields, not mutated in place)
+  — an early draft used `var` fields and in-place mutation instead; caught and fixed during this
+  issue's own self-review for consistency with the established convention. **`normalizationGain`
+  removed (2026-08-10 fix)**: `BGMTrack` originally mirrored `CachedTrack.normalizationGain`
+  (with a matching `BGMCacheStore.setNormalizationGain`), but BGM no longer measures loudness at
+  all — see `PlaybackController.swift`'s `playBGM` entry below for why — so both were deleted as
+  permanently dead rather than left around always `nil`. Backward-compatible: `Codable` synthesis
+  ignores unknown JSON keys, so an existing `bgm-pool.json` with old `normalizationGain` entries
+  still decodes fine.
 - `Sources/PlaylistBar/BGMChannelScanner.swift` — `BGMChannelScanner.scan(channelURL:)`
   (`bgm-002`, 2026-08-10), a channel-scanning sibling to `PlaylistScanner.scan(playlistURL:)`:
   scans a channel's `/videos` tab (appends `/videos` to the given URL if not already present) via
@@ -239,8 +252,8 @@ observable). Same PATH-hardening as `yt-dlp` above — see `FfmpegAvailability.s
   that yt-dlp's flat-playlist output already reports both fields per entry for a channel's videos
   tab, so no extra per-video resolution calls are needed. Eligibility: `duration >= 900` (15 min)
   and `availability != "subscriber_only"` (members-only marker). Returns fresh `BGMTrack`s (see
-  `BGMCache.swift` above) with `listenCount`/`normalizationGain` at their defaults — merging
-  against the existing pool to preserve those is `bgm-003`'s job, not this scan.
+  `BGMCache.swift` above) with `listenCount` at its default — merging against the existing pool to
+  preserve it is `bgm-003`'s job, not this scan.
 - `Sources/PlaylistBar/BGMChannels.swift` — `BGMChannels.all: [String]` (`bgm-003`, 2026-08-10),
   the configured BGM channel URL list (currently one), mirroring `FixedPlaylists.all`'s hardcoded
   convention — no in-app UI to edit it.
@@ -248,9 +261,9 @@ observable). Same PATH-hardening as `yt-dlp` above — see `FfmpegAvailability.s
   of `PlaylistLoader`: cache-first via `BGMCacheStore`, background refresh only when stale (same
   24h threshold). The refresh scans every `BGMChannels.all` entry, pools+dedupes across channels
   by video id, and — the key divergence from `PlaylistLoader` — merges the result against the
-  existing on-disk pool via `BGMCacheStore.merge` rather than replacing it, so listen counts and
-  normalization gain survive a rescan. A failed scan leaves the existing pool untouched, same
-  "don't let a broken refresh take away a working cache" rule as `PlaylistLoader`.
+  existing on-disk pool via `BGMCacheStore.merge` rather than replacing it, so listen counts
+  survive a rescan. A failed scan leaves the existing pool untouched, same "don't let a broken
+  refresh take away a working cache" rule as `PlaylistLoader`.
 - `Sources/PlaylistBar/BGMSelector.swift` — `BGMSelector.selectNext(from:excluding:)` (`bgm-004`,
   2026-08-10), the pure fewest-listens/random-tiebreak selection function: filters out the
   excluded (just-played) video unless that would empty the pool, finds the minimum `listenCount`
@@ -269,13 +282,19 @@ observable). Same PATH-hardening as `yt-dlp` above — see `FfmpegAvailability.s
   switching *between* BGM videos, so a still-armed tracker left running after leaving BGM would
   keep polling `AudioPlayer.currentTime` against whatever's now loaded and could misattribute a
   listen to a video that's no longer playing.
-- `Sources/PlaylistBar/StreamResolver.swift` — `StreamResolver.resolve(videoID:)`, resolves a
-  playable `bestaudio[ext=m4a]/bestaudio` stream URL via yt-dlp for one video, distinguishing
-  genuinely unavailable videos (best-effort message matching) from other failures. Deliberately
-  prefers M4A/AAC over yt-dlp's default best-bitrate pick (usually WebM/Opus), since AVFoundation
-  doesn't natively decode WebM — AVPlayerItem would silently never become ready otherwise. Also
-  returns the video's real duration via yt-dlp's own metadata (`--print "%(duration)s"`
-  piggybacked onto the same `-g` call, no extra process) — see `AudioPlayer.swift` below for why.
+- `Sources/PlaylistBar/StreamResolver.swift` — `StreamResolver.resolve(videoID:preferProgressive:)`,
+  resolves a playable stream URL via yt-dlp for one video, distinguishing genuinely unavailable
+  videos (best-effort message matching) from other failures. Default (`preferProgressive: false`,
+  used by the 4 fixed playlists via `PlaybackController`/`NextTrackPreloader`/
+  `TrackAvailabilityResolver`) prefers M4A/AAC (`bestaudio[ext=m4a]/bestaudio`) over yt-dlp's
+  default best-bitrate pick (usually WebM/Opus), since AVFoundation doesn't natively decode WebM —
+  AVPlayerItem would silently never become ready otherwise. Also returns the video's real duration
+  via yt-dlp's own metadata (`--print "%(duration)s"` piggybacked onto the same `-g` call, no extra
+  process) — see `AudioPlayer.swift` below for why. **`preferProgressive: true`** (added 2026-08-10
+  for BGM's startup-latency fix — see `PlaybackController.swift`'s `playBGM` entry below and
+  SPEC.md's "BGM channel playback" — "Startup latency for long videos") instead resolves via
+  `best[acodec!=none][vcodec!=none]`, yt-dlp's legacy progressive (audio+video combined,
+  faststart) format selector — used by BGM only.
 - `Sources/PlaylistBar/AudioPlayer.swift` — `AudioPlayer`, wraps a single `AVPlayer`: load/play/
   pause/stop plus an `onFinish` callback for natural track completion. Exposes `volume` (0.0–1.0)
   as a thin pass-through to `AVPlayer.volume` itself — a player-level property, so it applies
@@ -298,7 +317,16 @@ observable). Same PATH-hardening as `yt-dlp` above — see `FfmpegAvailability.s
   `player.seek(to: .zero)` + the existing `play()`, resetting `hasFiredFinishForCurrentItem` too —
   used by BGM's Reset, which restarts the *current* item rather than resolving a new one. Verified
   live against a real resolved stream: seeks genuinely back near 0 (not just continuing forward)
-  and resumes advancing afterward with `rate == 1.0`.
+  and resumes advancing afterward with `rate == 1.0`. `itemTracksObserver` (added 2026-08-10 as
+  part of BGM's startup-latency fix, see below) is a KVO observation on the current item's
+  `tracks` — populated asynchronously as the asset loads, same as `timeControlStatusObserver`'s
+  pattern — that disables (`isEnabled = false`) any `.video` track once known. Needed because
+  BGM's fix (below) makes `StreamResolver` resolve a combined audio+video stream for BGM, and this
+  `MenuBarExtra`-only app has no video surface anywhere to show it on — without this, `AVPlayer`
+  would decode video frames for nothing for up to an hour per BGM track. No-op for the 4 fixed
+  playlists' audio-only items. Invalidated at the top of `load()` (a fresh item each call) and in
+  `stop()`; relies on `NSKeyValueObservation`'s automatic invalidate-on-dealloc for `deinit`, same
+  as `timeControlStatusObserver` (which also has no explicit `deinit` line).
   **The real bug, found while implementing playback-engine-005 (2026-08-09):** YouTube serves
   resolved audio as a progressively-streamed, "not optimized" (moov-atom-at-end) M4A, so
   `AVFoundation` estimates duration before it can read the real one — reproducibly **~2x too
@@ -394,8 +422,9 @@ playback failure in `StreamResolver` and the `SMAppService` bundle-identity requ
 All 36 issues across the original 9 features are implemented (`issues/volume-control/` grew from 2
 to 8 issues on 2026-08-09 to cover automatic loudness normalization — see below — and all 8 are
 now done); QC (the `qc` skill's human test pass against `issues/FEATURES.md`) is in progress,
-started 2026-08-09. A 10th feature, **bgm**, was added 2026-08-10 (11 issues, in progress — see
-its own entry below) and isn't part of that QC pass yet.
+started 2026-08-09. A 10th feature, **bgm**, was added 2026-08-10 (11 issues, done — see its own
+entry below) and had a first QC attempt blocked by a real startup-latency bug, since fixed; still
+needs a fresh full QC pass of its own.
 
 - **app-shell**: `qc-passed`.
 - **playlist-data**: `qc-passed` (2026-08-09). Full pass against the real playlists: cache-first
@@ -458,18 +487,24 @@ its own entry below) and isn't part of that QC pass yet.
   YouTube channels, weighted toward whichever's been listened to least locally. All 11 issues are
   implemented — see the `Layout` entries above (`BGMCache.swift`, `BGMChannelScanner.swift`,
   `BGMChannels.swift`/`BGMLoader.swift`, `BGMSelector.swift`, `BGMListenTracker.swift` +
-  `AudioPlayer.currentTime`/`restart()`, `PlaybackController.swift`'s BGM integration, and
-  `ContentView.swift`'s picker/track-list entries) for what each piece does and the scope
-  decisions made along the way. **Never yet QC'd** — verification so far has been standalone
-  scripts (real live checks for the channel scan, the `Timer`/`RunLoop` mechanics, and
-  `AudioPlayer.restart()` against a real resolved stream; fake-injected control-flow scripts for
-  the rest) plus confirming the real app launches without crashing after each UI change — no
-  actual interactive run-through exists yet, consistent with this project's "visual/interactive
-  verification needs the user" limitation (see "Known gaps" below). `bgm-006`'s Notes list the
-  deliberate scope decisions worth knowing before QC: no BGM-specific next-track preloader (a
-  real, if usually brief, resolution gap on auto-advance, unlike the fixed playlists' gapless
-  transition), and a simplified (non-preload-sharing, non-retroactively-cached) loudness-gain
-  wait.
+  `AudioPlayer.currentTime`/`restart()`/`itemTracksObserver`, `PlaybackController.swift`'s BGM
+  integration, `StreamResolver.swift`'s `preferProgressive`, and `ContentView.swift`'s
+  picker/track-list entries) for what each piece does and the scope decisions made along the way.
+  **QC attempted 2026-08-10, blocked and reopened, then fixed**: the very first scenario (selecting
+  "BGM") got stuck on a loading spinner for several minutes with no audio, reproduced twice live.
+  Root cause: `AVPlayer` itself being slow to become ready-to-play for BGM's long (15 min–1 hr+),
+  `moov`-atom-at-end audio-only streams — not a bug in this feature's own orchestration code, which
+  was verified correct via live instrumentation. Fixed via `/interview` decision: BGM now resolves
+  a faststart format instead (`StreamResolver.resolve(preferProgressive: true)`), dropping
+  per-track loudness normalization for BGM as a consequence (see `PlaybackController.swift`'s
+  `playBGM` entry above, and SPEC.md's "BGM channel playback" — "Startup latency for long videos" —
+  for the full writeup and rejected alternatives). Verified live: cleared the BGM cache to force a
+  fresh channel scan (matching the original repro) and confirmed BGM now plays quickly. **Still not
+  fully QC'd** — this fix only unblocks the first scenario; QC was blocked before reaching Next/
+  Previous/Reset/history/restore-on-relaunch/listen-count, so a fresh full `/qc` pass over this
+  feature is still needed. `bgm-006`'s Notes list the remaining deliberate scope decisions worth
+  knowing before that pass: no BGM-specific next-track preloader (a real, if usually brief,
+  resolution gap on auto-advance, unlike the fixed playlists' gapless transition).
 
 Known gaps worth knowing about, not blockers:
 - **Visual/interactive UI verification turned out to be possible after all**, just not via

@@ -64,9 +64,42 @@ separate picker entry — a deliberate choice over one-picker-entry-per-channel.
   listen counts on every 24h refresh would defeat the feature.
 - **Navigation is different from the 4 fixed playlists** (no fixed order, so index-based
   wrap-around doesn't apply) — see "Behavior rules" below.
-- Master volume trim and per-track loudness normalization (see "Volume & loudness normalization")
-  apply to BGM videos exactly as they do to regular playlist tracks — same pipeline, same
-  per-video cached gain, no special-casing.
+- **Master volume trim applies to BGM exactly as it does to regular playlist tracks — per-track
+  loudness normalization does not** (revised 2026-08-10, see "Startup latency for long videos"
+  below for why). BGM videos always play at normalization gain `1.0`; only the manual master trim
+  attenuates them.
+- **Stream resolution is special-cased for BGM** (revised 2026-08-10): BGM resolves its playable
+  stream via yt-dlp's `best[acodec!=none][vcodec!=none]` selector — YouTube's legacy progressive
+  (audio+video combined, faststart) format — instead of the `bestaudio[ext=m4a]/bestaudio`
+  audio-only format the 4 fixed playlists use. The bundled video track is downloaded but never
+  decoded (disabled on the loaded player item — there's no video surface in this app regardless).
+  If no progressive format exists for a given video (rare), it's treated as unavailable for that
+  pick, same as a deleted/private/region-locked video — skipped in favor of another selection via
+  the existing retry loop, not a new failure path.
+
+### Startup latency for long videos (found during BGM QC, fixed 2026-08-10)
+
+YouTube's audio-only DASH formats (itags 139/249/140/251) are served with the MP4 `moov` atom
+positioned at the *end* of the file rather than the front ("faststart"). `AVFoundation` has to
+effectively reach near the end of the file before it can begin decoding anything. For the 4 fixed
+playlists' short (few-minute) tracks this cost was never noticeable. BGM's videos are the first
+content in this app with no upper length bound (confirmed live: a real ~59-minute pool video took
+several minutes of dead-air, spinner-only wait before audio started) — the delay scales with file
+size/length, and BGM is the only place in the app that plays anything long enough to expose it.
+
+Confirmed via live investigation (system log + `nettop`) that this is **not** a bug in this app's
+own orchestration code — `playBGM`'s loudness-analysis timeout, stream resolution, and
+`player.load`/`player.play` calls all complete correctly within seconds; `AVPlayer` itself was
+just slow to become ready-to-play for that specific stream shape.
+
+**Fix**: BGM resolves via a progressive (faststart) format instead of audio-only DASH — see above.
+This eliminates the delay regardless of video length, at the cost of downloading (not decoding)
+unneeded video data — an accepted tradeoff given this is a local, unmetered-connection tool.
+**Loudness normalization was dropped for BGM as a consequence**, not decided independently: the
+per-track analysis pass would now also need to skip/ignore the newly-present video stream, and for
+an hour-long ambient track the `ffmpeg` analysis itself could take many minutes of real time for
+a value whose benefit (precise volume-matching for long-form ambient content) was judged not worth
+that ongoing cost once startup speed no longer depended on it.
 
 ## Platform & stack
 
@@ -152,6 +185,9 @@ background listening.
   in the two moments above (next-track preload, or an out-of-order play). A playlist you've never
   played through will sound inconsistent until you've heard each track at least once; acceptable
   starting tradeoff, revisit later if it's not.
+- **Does not apply to BGM** (revised 2026-08-10) — BGM always plays at normalization gain `1.0`.
+  See "BGM channel playback"'s "Startup latency for long videos" for why this was dropped
+  specifically for BGM after initially being designed to cover it too.
 
 ## Local state (per playlist)
 

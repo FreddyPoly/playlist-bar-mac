@@ -12,10 +12,6 @@ struct BGMTrack: Codable, Equatable {
     /// eligibility filter (`bgm-002`) and the listen-count threshold (`bgm-005`).
     let duration: Double
     var listenCount: Int = 0
-    /// Same per-track normalization gain concept as `CachedTrack.normalizationGain` — `nil` until
-    /// measured. Tracked here too (rather than a separate cache) so BGM videos get the same
-    /// loudness normalization as regular playlist tracks — see SPEC.md's "BGM channel playback".
-    var normalizationGain: Double? = nil
 }
 
 /// The pooled BGM cache: eligible videos across every configured channel (currently one — see
@@ -71,11 +67,10 @@ enum BGMCacheStore {
     }
 
     /// Merges a freshly-scanned set of eligible tracks into the existing pool by video id: a
-    /// track still present keeps its existing `listenCount`/`normalizationGain`; a track no
-    /// longer present (deleted, went members-only, fell under 15 minutes, channel removed it) is
-    /// simply absent from the result; a newly-eligible track is added starting at 0 listens with
-    /// no cached gain. Pure function — callers (`bgm-003`) are responsible for persisting the
-    /// result.
+    /// track still present keeps its existing `listenCount`; a track no longer present (deleted,
+    /// went members-only, fell under 15 minutes, channel removed it) is simply absent from the
+    /// result; a newly-eligible track is added starting at 0 listens. Pure function — callers
+    /// (`bgm-003`) are responsible for persisting the result.
     ///
     /// This is the deliberate deviation from `PlaylistCacheStore`'s full-replace-on-rescan
     /// behavior — see SPEC.md's "BGM channel playback": losing listen counts on every 24h refresh
@@ -86,7 +81,6 @@ enum BGMCacheStore {
             guard let previous = existingByID[fresh.videoID] else { return fresh }
             var merged = fresh
             merged.listenCount = previous.listenCount
-            merged.normalizationGain = previous.normalizationGain
             return merged
         }
     }
@@ -100,18 +94,6 @@ enum BGMCacheStore {
         }
         var tracks = cache.tracks
         tracks[index].listenCount += 1
-        try? save(BGMPoolCache(tracks: tracks, lastScannedAt: cache.lastScannedAt))
-    }
-
-    /// Updates one track's cached normalization gain and persists it — mirrors
-    /// `PlaylistCacheStore.setNormalizationGain(_:forVideoID:playlistSlug:)`.
-    static func setNormalizationGain(_ gain: Double, forVideoID videoID: String) {
-        guard let cache = load(),
-              let index = cache.tracks.firstIndex(where: { $0.videoID == videoID }) else {
-            return
-        }
-        var tracks = cache.tracks
-        tracks[index].normalizationGain = gain
         try? save(BGMPoolCache(tracks: tracks, lastScannedAt: cache.lastScannedAt))
     }
 }

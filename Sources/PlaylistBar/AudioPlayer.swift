@@ -18,6 +18,11 @@ final class AudioPlayer: ObservableObject {
     private let player = AVPlayer()
     private var didFinishObserver: NSObjectProtocol?
     private var timeControlStatusObserver: NSKeyValueObservation?
+    /// Disables any video track on the currently-loaded item once it's known (see `load()`) —
+    /// there's no video surface anywhere in this `MenuBarExtra`-only app, so a video track (BGM's
+    /// progressive-format streams carry one, see `StreamResolver.resolve(preferProgressive:)`)
+    /// would otherwise be decoded for nothing, for as long as an hour, for no benefit.
+    private var itemTracksObserver: NSKeyValueObservation?
     private var onFinish: (() -> Void)?
     private var onBufferingChange: ((Bool) -> Void)?
 
@@ -74,11 +79,20 @@ final class AudioPlayer: ObservableObject {
     func load(url: URL, duration: Double?, autoplay: Bool = true) {
         removeFinishObserver()
         knownEndWatchdog?.invalidate()
+        itemTracksObserver?.invalidate()
         isBuffering = false
         hasFiredFinishForCurrentItem = false
 
         let item = AVPlayerItem(url: url)
         player.replaceCurrentItem(with: item)
+
+        // `item.tracks` populates asynchronously as the asset loads. A no-op for audio-only items
+        // (the 4 fixed playlists) since none of their tracks are ever `.video`.
+        itemTracksObserver = item.observe(\.tracks, options: [.new]) { item, _ in
+            for track in item.tracks where track.assetTrack?.mediaType == .video {
+                track.isEnabled = false
+            }
+        }
 
         didFinishObserver = NotificationCenter.default.addObserver(
             forName: .AVPlayerItemDidPlayToEndTime,
@@ -146,6 +160,7 @@ final class AudioPlayer: ObservableObject {
         player.replaceCurrentItem(with: nil)
         removeFinishObserver()
         knownEndWatchdog?.invalidate()
+        itemTracksObserver?.invalidate()
         isPlaying = false
         isBuffering = false
         endBackgroundActivity()

@@ -141,3 +141,113 @@ rendering needs the user" limitation noted in `CLAUDE.md`.
 **Review**: manual pass in place of `/code-review` (see `bgm-002`'s Notes). `security: false` — no
 new subprocess/parsing surface beyond what `bgm-002`/`playback-engine-001` already introduced and
 reviewed. No findings beyond the scope decisions and known gap already disclosed above.
+
+## QC feedback (2026-08-10) — reopened
+
+**Scenario tested**: first-time selection of "BGM" from the playlist picker (fresh channel scan,
+no cache), per SPEC.md's "Switching playlists: ... starts playing immediately" and the BGM-specific
+acceptance criterion above ("Selecting 'BGM' ... starts playback of a video").
+
+**Expected**: playback starts within a few seconds, same as switching to any of the 4 fixed
+playlists.
+
+**Actual**: the app got stuck showing the loading spinner for **several minutes with no audio**,
+reproduced twice live by the user (fresh app launch each time, real channel scan, real video pick).
+Investigated live with temporary debug instrumentation added directly to `playBGM`/
+`measureBGMGain` (reverted after diagnosis, not left in the codebase):
+
+- The picked video was a genuine BGM pool member with `duration=3553s` (~59 minutes) — well within
+  the pool's `duration >= 900` filter, but far longer than anything in the 4 fixed playlists (which
+  this app's playback path has only ever been exercised against so far).
+- `measureBGMGain`'s 5-second bounded wait **works correctly** — confirmed via instrumented logs:
+  the timeout task fires at ~5s, the real (slow) `ffmpeg` analysis is correctly abandoned-but-left-
+  running in the background, and `playBGM` proceeds to call `applyEffectiveVolume()` /
+  `player.load(url:duration:autoplay:true)` within ~5 seconds of selection every time. This part of
+  `bgm-006`'s own implementation is **not** the bug — no code change needed here.
+- `AudioPlayer.load()`/`player.play()` genuinely get called on time. Confirmed via the system log
+  (`log show --predicate "processID == <pid>"`) that `AVPlayer`'s own network layer opens a real
+  connection and receives a successful `HTTP 206` response within seconds of `player.load` being
+  called, and `nettop` confirmed bytes continuing to trickle in afterward (not a dead connection) —
+  yet the UI stayed on the loading spinner for minutes past that point, confirmed directly by the
+  user both times.
+- Conclusion: `AVPlayer` itself is taking a very long time to become ready-to-play for this
+  specific stream, independent of anything `bgm-006`'s own orchestration code does wrong. The likely
+  cause is the same structural issue already documented in `AudioPlayer.swift`/
+  `playback-engine-005` — YouTube serves these streams as progressively-downloaded,
+  moov-atom-at-end M4A — but that issue was previously only observed to cause a **duration**
+  miscalculation (2x too long) for normal, few-minutes-long fixed-playlist tracks, where playback
+  itself still *starts* promptly. BGM's videos are a new, much longer regime (up to ~1 hour, no
+  upper bound in the pool filter) that this codebase's playback path has never been exercised
+  against before this QC pass — for a large enough file, locating/reading the trailing moov atom
+  before `AVPlayer` can begin decoding anything may itself take a long time, independent of the
+  already-known duration bug. Not confirmed as the exact mechanism (that would need deeper
+  `AVFoundation`-level investigation, e.g. tracing exactly which byte ranges `AVPlayer` requests and
+  how many round trips it takes before `timeControlStatus` leaves `.waitingToPlayAtSpecifiedRate`),
+  but the video-length correlation and the "real data is flowing, just very slowly toward
+  readiness" evidence both point here rather than at anything in `playBGM`'s own control flow.
+
+**What to try when picking this back up**: this is likely a genuine gap in this feature's design,
+not a small bug — options worth considering (not decided here): capping the BGM pool's eligible
+video length at something well under an hour; picking a different yt-dlp format/itag that isn't
+moov-atom-at-end for these specific streams if one exists; or accepting a real multi-second-to-
+multi-minute startup latency for very long videos and making that legible in the UI (e.g. a
+"this may take a while for long tracks" message) rather than an indistinguishable-from-frozen
+spinner. Whichever direction is chosen, re-verify live against a real long (~30–60 min) video from
+the actual configured channel, not just a standalone script — that's exactly the gap that let this
+ship undetected (see `bgm-006`'s own "Verification" note above: all prior verification used fakes
+standing in for `StreamResolver`/`LoudnessAnalyzer`/`AVPlayer`, never a real long-form stream
+through the real player).
+
+**Blocked as a result**: this QC pass could not proceed past the very first BGM scenario (selecting
+BGM and having it start playing) — Next/Previous/Reset/history/restore-on-relaunch/listen-count
+scenarios are all untested pending a fix here, since none of them are reachable without playback
+actually starting.
+
+## Fix (2026-08-10)
+
+Ran an `/interview` to decide the direction (full decisions + rationale in `SPEC.md`'s "BGM
+channel playback" — "Startup latency for long videos" — and "Volume & loudness normalization").
+Decided: switch BGM (only) to yt-dlp's progressive/faststart format instead of audio-only DASH,
+accepting extra bandwidth (confirmed not a concern for this local, unmetered-connection tool) for
+reliably fast start regardless of video length. Per-track loudness normalization was dropped for
+BGM as a direct consequence — analyzing a full hour-long combined AV stream with `ffmpeg` on every
+first play was judged not worth the cost once nothing was blocked on it anymore.
+
+**Changes**:
+- `StreamResolver.resolve(videoID:preferProgressive:)` gained a `preferProgressive` parameter
+  (default `false`, so the 4 fixed playlists and `NextTrackPreloader`/`TrackAvailabilityResolver`
+  are untouched). When `true`, resolves via yt-dlp's `best[acodec!=none][vcodec!=none]` selector
+  instead of `bestaudio[ext=m4a]/bestaudio`. `playBGM` passes `true`.
+- `playBGM`'s entire loudness-analysis wait (the `measureBGMGain` call and its surrounding
+  `isAwaitingLoudnessAnalysis` block) is deleted, along with the now-fully-dead
+  `measureBGMGain(url:timeout:)` function itself. BGM tracks always construct with
+  `normalizationGain: nil` — `currentTrackGain` already falls back to `1.0` for `nil`, so this
+  needed no changes to shared volume code.
+- `BGMTrack.normalizationGain` and `BGMCacheStore.setNormalizationGain` removed entirely
+  (permanently dead after the above) — `BGMCacheStore.merge` no longer carries a gain field
+  forward either. Backward-compatible: `Codable` synthesis ignores unknown JSON keys, so an
+  existing `bgm-pool.json` with old `normalizationGain` entries decodes fine.
+- `AudioPlayer.load()` gained an `itemTracksObserver` (KVO on `item.tracks`, mirroring the
+  existing `timeControlStatusObserver` pattern) that disables any `.video` track on the loaded
+  item once known — the app has no video surface anywhere, so BGM's now-present video track would
+  otherwise be decoded for up to an hour for nothing. No-op for the 4 fixed playlists' audio-only
+  items.
+
+**Format-selector nuance found during verification, not assumed away**: `best[acodec!=none]
+[vcodec!=none]` doesn't always resolve to the same format shape — tested against 3 real pool
+videos and got legacy progressive MP4 (itag 18) for 2, and an HLS manifest (itag 96, `.m3u8`) for
+1 (same video, resolved differently across separate calls — YouTube's own format availability
+appears to vary per request for this content). Rather than assume this was fine, wrote a
+standalone script (`AVPlayer` + KVO on `timeControlStatus`, timing to `.playing`) and tested all
+three real shapes directly: progressive MP4 **1.23s**, HLS manifest **1.80s**, and — as a
+sanity check that the harness itself would actually catch the original bug — audio-only DASH
+**timed out at 30s**, reproducing the original failure. Both formats the selector can actually
+resolve to are fast; the fix holds regardless of which one yt-dlp picks for a given video.
+
+**Verified live end-to-end**: cleared `bgm-pool.json` to force a real fresh channel scan (matching
+the original repro conditions), rebuilt the packaged `.app`, and had the user select "BGM" again —
+confirmed playing quickly, no more stuck spinner.
+
+**Not yet re-verified**: the rest of the BGM QC scenarios blocked by this bug (Next/Previous/
+Reset/history/restore-on-relaunch/listen-count) — this fix only unblocks scenario 1. A fresh full
+`/qc` pass over the `bgm` feature is still needed.

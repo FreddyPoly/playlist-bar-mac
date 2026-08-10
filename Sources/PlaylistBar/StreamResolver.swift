@@ -39,10 +39,19 @@ enum StreamResolver {
         "members-only content",
     ]
 
-    /// Resolves a playable, audio-only direct stream URL for a YouTube video id. Stream URLs
-    /// expire after a few hours, so this should be called close to when playback actually
-    /// starts rather than resolved in bulk ahead of time.
-    static func resolve(videoID: String) throws -> StreamResolution {
+    /// Resolves a playable direct stream URL for a YouTube video id. Stream URLs expire after a
+    /// few hours, so this should be called close to when playback actually starts rather than
+    /// resolved in bulk ahead of time.
+    ///
+    /// - Parameter preferProgressive: When `true`, resolves YouTube's legacy progressive
+    ///   (audio+video combined, faststart/`moov`-at-front) format instead of the default
+    ///   audio-only DASH format. Used by BGM only (see SPEC.md's "BGM channel playback" — "Startup
+    ///   latency for long videos"): DASH audio-only streams are `moov`-atom-at-end, and
+    ///   `AVPlayer`'s time-to-ready-to-play for that shape scales with file size/length badly
+    ///   enough for BGM's long (15 min–1 hr+) videos to look frozen for minutes. The 4 fixed
+    ///   playlists' short tracks have never shown this, so they keep the efficient audio-only
+    ///   default.
+    static func resolve(videoID: String, preferProgressive: Bool = false) throws -> StreamResolution {
         let watchURL = "https://www.youtube.com/watch?v=\(videoID)"
 
         let result: YtDlpRunner.Result
@@ -54,8 +63,11 @@ enum StreamResolver {
             // for the rare video with no M4A track at all. `--print "%(duration)s"` piggybacks
             // the real duration onto the same call (see `StreamResolution.available`'s doc
             // comment) — printed before `-g`'s URL line, no extra yt-dlp invocation needed.
+            let formatSelector = preferProgressive
+                ? "best[acodec!=none][vcodec!=none]"
+                : "bestaudio[ext=m4a]/bestaudio"
             result = try YtDlpRunner.run(arguments: [
-                "-f", "bestaudio[ext=m4a]/bestaudio", "--print", "%(duration)s", "-g", watchURL,
+                "-f", formatSelector, "--print", "%(duration)s", "-g", watchURL,
             ])
         } catch YtDlpRunner.RunError.ytDlpNotFound {
             throw ResolutionError.ytDlpNotFound

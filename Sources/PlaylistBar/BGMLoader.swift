@@ -84,8 +84,8 @@ final class BGMLoader: ObservableObject {
         }
 
         // Merge against whatever's currently on disk (not the in-memory `tracks`, which could be
-        // stale relative to a concurrent write) before persisting — preserves listenCount/
-        // normalizationGain for every track still eligible, per BGMCacheStore.merge's contract.
+        // stale relative to a concurrent write) before persisting — preserves listenCount for
+        // every track still eligible, per BGMCacheStore.merge's contract.
         let existingTracks = BGMCacheStore.load()?.tracks ?? []
         let merged = BGMCacheStore.merge(freshlyScanned: scanned, into: existingTracks)
         let cache = BGMPoolCache(tracks: merged, lastScannedAt: Date())

@@ -318,9 +318,11 @@ final class PlaybackController: ObservableObject {
             attemptsRemaining -= 1
             guard generation == switchGeneration else { return }
 
+            // BGM tracks are never loudness-normalized (see SPEC.md's "Startup latency for long
+            // videos") — always gain `nil`, which `currentTrackGain` already treats as `1.0`.
             tracks = [CachedTrack(
                 videoID: candidate.videoID, title: candidate.title,
-                normalizationGain: candidate.normalizationGain
+                normalizationGain: nil
             )]
             currentIndex = 0
             isResolvingTrack = true
@@ -330,7 +332,7 @@ final class PlaybackController: ObservableObject {
             do {
                 let videoID = candidate.videoID
                 resolution = try await Task.detached(priority: .utility) {
-                    try StreamResolver.resolve(videoID: videoID)
+                    try StreamResolver.resolve(videoID: videoID, preferProgressive: true)
                 }.value
             } catch StreamResolver.ResolutionError.ytDlpNotFound {
                 guard generation == switchGeneration else { return }
@@ -361,29 +363,13 @@ final class PlaybackController: ObservableObject {
 
             errorMessage = nil
 
-            // Loudness normalization for BGM, deliberately simpler than the fixed-playlist path's
-            // LoudnessGainCoordinator/NextTrackPreloader combo: no background preload head-start
-            // (BGM's next pick isn't decided until it's needed, so there's nothing to preload
-            // ahead of time — see this issue's Notes), and a standalone bounded wait rather than
-            // sharing an in-flight-task cache. A timed-out-but-later-successful analysis is not
-            // retroactively cached the way the fixed-playlist coordinator's is — a smaller
-            // regression than skipping normalization for BGM entirely, and simpler to reason
-            // about; noted as a possible future improvement, not silently dropped.
-            if candidate.normalizationGain == nil {
-                isAwaitingLoudnessAnalysis = true
-                let measured = await measureBGMGain(
-                    url: url, timeout: Self.loudnessAnalysisTimeout
-                )
-                guard generation == switchGeneration else { return }
-                isAwaitingLoudnessAnalysis = false
-                if let measured {
-                    BGMCacheStore.setNormalizationGain(measured, forVideoID: candidate.videoID)
-                    if tracks.indices.contains(0) {
-                        tracks[0].normalizationGain = measured
-                    }
-                }
-            }
-
+            // No per-track loudness normalization for BGM (revised 2026-08-10, see SPEC.md's
+            // "BGM channel playback" — "Startup latency for long videos"): BGM now resolves a
+            // progressive (audio+video) stream to fix a real startup-latency bug, and re-analyzing
+            // an hour-long combined stream with ffmpeg on every first play was judged not worth
+            // the cost once nothing was blocked on it anymore. BGM tracks always play at
+            // normalization gain 1.0 — `currentTrackGain` already falls back to that when a
+            // track's `normalizationGain` is `nil`, which it now always is for BGM.
             applyEffectiveVolume()
             player.load(url: url, duration: duration, autoplay: true)
             hasLoadedCurrentTrack = true
@@ -412,35 +398,6 @@ final class PlaybackController: ObservableObject {
         currentIndex = nil
         tracks = []
         hasLoadedCurrentTrack = false
-    }
-
-    /// Measures loudness gain for a BGM track's resolved stream, bounded by `timeout` — same
-    /// continuation-race shape as `LoudnessGainCoordinator.gain(for:url:playlistSlug:timeout:)`
-    /// (avoiding `withTaskGroup`'s "waits for every child including the loser" pitfall — see that
-    /// type's own Notes for the real bug that shape caused), but without an in-flight-task cache
-    /// shared with a preloader, since BGM has none. Returns `nil` on timeout or genuine failure —
-    /// never written back to the cache in that case, same "fallback isn't a measurement" rule.
-    private func measureBGMGain(url: URL, timeout: Duration) async -> Double? {
-        await withCheckedContinuation { (continuation: CheckedContinuation<Double?, Never>) in
-            var hasResumed = false
-
-            Task {
-                let measured = try? await Task.detached(priority: .utility) {
-                    try LoudnessAnalyzer.measureGain(url: url)
-                }.value
-                if !hasResumed {
-                    hasResumed = true
-                    continuation.resume(returning: measured)
-                }
-            }
-            Task {
-                try? await Task.sleep(for: timeout)
-                if !hasResumed {
-                    hasResumed = true
-                    continuation.resume(returning: nil)
-                }
-            }
-        }
     }
 
     /// Restores the last active playlist and its last-played track for display **without**
@@ -502,7 +459,7 @@ final class PlaybackController: ObservableObject {
 
         tracks = [CachedTrack(
             videoID: restoredTrack.videoID, title: restoredTrack.title,
-            normalizationGain: restoredTrack.normalizationGain
+            normalizationGain: nil
         )]
         currentIndex = 0
         bgmHistory = [restoredTrack]
