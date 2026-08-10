@@ -251,3 +251,112 @@ confirmed playing quickly, no more stuck spinner.
 **Not yet re-verified**: the rest of the BGM QC scenarios blocked by this bug (Next/Previous/
 Reset/history/restore-on-relaunch/listen-count) — this fix only unblocks scenario 1. A fresh full
 `/qc` pass over the `bgm` feature is still needed.
+
+## QC feedback (2026-08-10) — reopened (second pass)
+
+Full `/qc` pass over the `bgm` feature, on a freshly relaunched app each time state needed to be
+known-clean (the previous QC attempt's app process turned out to still be running from earlier
+that day, which briefly produced a false-looking duplicate-row report in scenario 2 before that
+was traced to leftover session state, not a bug — restarted the app and re-verified scenario 2
+clean before continuing).
+
+**Scenarios that passed** (10 of 11): resume-a-restored-session Play press (`bgm-009`'s restore +
+this issue's `togglePlayPause()` BGM fallback branch), BGM track list shape with one entry and no
+"next" slot (`bgm-011`), Next picking a genuinely different track (this issue), Previous walking
+back through session history (`bgm-007`), Next-after-Previous discarding forward history and
+picking fresh rather than redoing (`bgm-007`), clicking an older history entry directly
+(`bgm-007`/`bgm-011`), Reset restarting the current video from 0:00 with no history/pick change
+(`bgm-008`), listen-count incrementing after ~35s continuous playback and cross-checked directly
+against `bgm-pool.json` on disk (`bgm-005`), master volume trim applying live during BGM playback,
+and restore-on-relaunch showing the last-played video displayed-but-not-playing with a clean
+single-entry history (`bgm-009`).
+
+**Scenario that failed**: switching away from BGM to a fixed playlist (Jazz) and back to BGM.
+
+- **Expected**: per SPEC.md's "Switching playlists: ... resumes the saved last-played track" —
+  switching back to BGM should resume the last-played BGM video, same as it does for any fixed
+  playlist, without corrupting session history.
+- **Actual**: the resumed video was appended as a **new, duplicate** entry in `bgmHistory`/the
+  track list, even though it was already the most recent entry there. Track list went from 1 entry
+  (the pre-switch current track) to 3: [original track, the track visited via Next/Previous
+  earlier in the session, original track **again**] — the same title rendered twice, both showing
+  its snapshotted listen count. Reproduced once, clearly, screenshotted by the user.
+- **Root cause traced in code**: `switchToBGM()` (`Sources/PlaylistBar/PlaybackController.swift`,
+  around line 213) unconditionally calls
+  `playBGM(startingFrom: startTrack, generation: generation, appendToHistory: true)` — it doesn't
+  check whether `startTrack` (the resumed last-played video, read from `PlayerStateStore`) is
+  already `bgmHistory.last`. Every other "resume this specific track" path in this file
+  (`previousBGM()`, `selectBGMHistoryEntry(at:)`) correctly passes `appendToHistory: false` because
+  the target is already in history; `switchToBGM()` is the one path that treats "resume the saved
+  position" the same as "genuinely pick something new" (which is correct for `next()`/
+  `advanceBGM()`, but not here).
+- **What to try when picking this back up**: `switchToBGM()` needs to distinguish "resuming the
+  same video that's already the live edge of `bgmHistory`" (append: false, or better, don't touch
+  history at all) from "no saved video / saved video no longer in the pool, so falling back to a
+  fresh `BGMSelector` pick" (append: true, this is genuinely new). Note `switchToBGM()` is also the
+  very first BGM entry point ever, when `bgmHistory` is still empty — that case still needs to seed
+  history with one entry, same as `restoreBGMSession()` already does, so don't just flip the flag
+  to `false` unconditionally either. Re-verify by repeating this exact scenario (switch to a fixed
+  playlist and back to BGM at least twice in a row) after the fix, since the bug only shows up on
+  the *second+* visit to BGM within a session, not the first.
+
+## Fix (2026-08-10, second pass)
+
+**Root cause confirmed**: `switchToBGM()` unconditionally passed `appendToHistory: true` to
+`playBGM`, even when the video it was about to resume (read from `PlayerStateStore`) was already
+present in `bgmHistory` — every other "resume a specific known track" path in this file
+(`previousBGM()`, `selectBGMHistoryEntry(at:)`) already knew to pass `appendToHistory: false` for
+exactly this reason; `switchToBGM()` was the one path that didn't.
+
+**Fix**: `switchToBGM()` now searches `bgmHistory` for the resumed track's video id before calling
+`playBGM`. If found (the common case — either the entry `restoreBGMSession()` seeded at launch, or
+something actually played earlier this session before switching away and back), it resumes in
+place: sets `bgmHistoryPosition` to that entry's index (mirroring `selectBGMHistoryEntry(at:)`'s
+own live-edge-vs-mid-history convention) and passes `appendToHistory: false`. Only when the video
+genuinely isn't in `bgmHistory` yet (nothing saved this session, or `BGMSelector` had to fall back
+to a fresh pick because the saved video dropped out of the pool) does it append as before. The
+earlier unconditional `bgmHistoryPosition = nil` reset was removed since both branches now set it
+explicitly and correctly.
+
+Handles a case beyond the original repro too: if the user had walked backward via Previous
+*before* leaving BGM, the saved position isn't `bgmHistory.last` — it's wherever they'd walked
+back to. The fix resumes at that exact mid-history index rather than either duplicating it or
+incorrectly snapping to the live edge.
+
+**Verification**:
+- Standalone script (pure decision logic extracted and exercised with fakes, since
+  `PlaybackController`'s async methods can't be unit-tested directly — same convention as this
+  project's other controller-level verification): resuming the live-edge track doesn't append and
+  resolves to the live edge; resuming a mid-history track (walked-back-then-switched-away case)
+  doesn't append and resolves to its actual index, not the live edge; a genuinely fresh pick with
+  empty history appends; a fresh pick whose video isn't anywhere in history (saved video fell out
+  of the pool) appends. All passed.
+- `swift build` succeeds with no warnings.
+- **Live, with the packaged app**: repeated the exact QC repro — switch BGM → Jazz → BGM → Jazz →
+  BGM (two full round-trips) — and confirmed the track list stayed at one entry (the current
+  track), no duplicates, after the second return. Also re-verified the resume-a-restored-session
+  Play press still works correctly (unaffected — that path is `togglePlayPause()`'s BGM fallback,
+  never touched by this fix).
+- One transient stuck-loading-spinner was observed mid-investigation on a relaunch, before the
+  switch-away/back retest — traced it independently: manually ran the exact yt-dlp resolution
+  command used by `playBGM` outside the app and it succeeded in 1.3s, and a debug-instrumented
+  rebuild of the *unmodified* `togglePlayPause`/`playBGM` code path played back correctly moments
+  later with no code change. Not reproduced again after that; judged environmental (likely from the
+  rapid succession of app quit/relaunch cycles during this same QC/fix session), not caused by this
+  fix or a regression in the code this fix touches. Worth knowing about if it recurs, but not
+  attributed to `bgm-006`.
+
+**Re-checked against this issue's original acceptance criteria** (all still hold, none weakened by
+this fix): selecting/resuming BGM starts playback; Next/auto-advance still picks and persists a new
+video; unavailable-video handling, loudness/volume behavior, and single-thing-plays-at-once are all
+untouched by this change, which is scoped entirely to `switchToBGM()`'s history bookkeeping.
+
+**Review**: manual pass in place of `/code-review` (same limitation as before — no remote
+configured, see `bgm-002`'s Notes). Diff is a single, self-contained change to `switchToBGM()`; the
+resume-in-place branch reuses `bgmHistory[existingIndex]` (not the freshly-loaded pool's copy) for
+`playBGM`'s `startingFrom` argument, deliberately matching `previousBGM()`/
+`selectBGMHistoryEntry(at:)`'s existing convention rather than introducing a new one — the only
+practical difference is a possibly-stale `listenCount` snapshot, which is already a disclosed,
+accepted simplification (see `ContentView.swift`'s "Known simplification" note in `CLAUDE.md`) and
+has no effect on playback or the persisted count itself (`BGMCacheStore.incrementListenCount`
+always operates by video id against the real on-disk cache, never off this snapshot). No findings.

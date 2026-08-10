@@ -204,7 +204,18 @@ observable). Same PATH-hardening as `yt-dlp` above — see `FfmpegAvailability.s
   literals that merely happened to match. **`bgmCurrentHistoryIndex: Int?`** (`bgm-011`,
   2026-08-10): `bgmHistoryPosition` if set, else the live edge (`bgmHistory.count - 1`) — exposed
   so `ContentView.swift`'s BGM track list doesn't need to know about the private
-  `bgmHistoryPosition` implementation detail.
+  `bgmHistoryPosition` implementation detail. **`switchToBGM()` history-duplication fix** (found
+  during a fresh `bgm` QC pass, fixed 2026-08-10): switching away from BGM to a fixed playlist and
+  back used to append a duplicate entry to `bgmHistory` for the resumed track, because
+  `switchToBGM()` unconditionally passed `appendToHistory: true` even when the resumed video was
+  already the most recent (or a mid-history) entry — every other "resume a known track" path
+  (`previousBGM()`, `selectBGMHistoryEntry(at:)`) already avoided this by passing `false`.
+  `switchToBGM()` now searches `bgmHistory` for the resumed video first; if found, it resumes in
+  place (sets `bgmHistoryPosition` to that entry's index, `appendToHistory: false`) instead of
+  appending — only a genuinely fresh pick (nothing saved yet, or the saved video fell out of the
+  pool) still appends. See `bgm-006`'s "Fix (2026-08-10, second pass)" note for the full
+  before/after and verification (a standalone script covering the live-edge and mid-history resume
+  cases, plus a live repeated switch-away/switch-back check with the packaged app).
 - `Sources/PlaylistBar/Playlists.swift` — `Playlist` model and `FixedPlaylists.all`, the app's 4
   fixed playlists (slug/name/URL) transcribed from SPEC.md.
 - `Sources/PlaylistBar/PlaylistLoader.swift` — `PlaylistLoader`, cache-first playlist loading:
@@ -482,7 +493,8 @@ needs a fresh full QC pass of its own.
   banner (like `menu-bar-ui-005`'s yt-dlp one) or just silently degrade (every track plays
   unnormalized) was deliberately left an open question in `volume-control-003`'s Notes, not
   decided — currently it silently degrades, which may or may not be the right call.
-- **bgm**: `ready-for-qc`, 11/11 done — added 2026-08-10 (see SPEC.md's "BGM channel playback"), a
+- **bgm**: `ready-for-qc` (2026-08-10), 11/11 done — added 2026-08-10 (see SPEC.md's "BGM channel
+  playback"), a
   5th playlist-picker entry that plays random 15+ minute, non-members-only videos from a pool of
   YouTube channels, weighted toward whichever's been listened to least locally. All 11 issues are
   implemented — see the `Layout` entries above (`BGMCache.swift`, `BGMChannelScanner.swift`,
@@ -499,12 +511,23 @@ needs a fresh full QC pass of its own.
   per-track loudness normalization for BGM as a consequence (see `PlaybackController.swift`'s
   `playBGM` entry above, and SPEC.md's "BGM channel playback" — "Startup latency for long videos" —
   for the full writeup and rejected alternatives). Verified live: cleared the BGM cache to force a
-  fresh channel scan (matching the original repro) and confirmed BGM now plays quickly. **Still not
-  fully QC'd** — this fix only unblocks the first scenario; QC was blocked before reaching Next/
-  Previous/Reset/history/restore-on-relaunch/listen-count, so a fresh full `/qc` pass over this
-  feature is still needed. `bgm-006`'s Notes list the remaining deliberate scope decisions worth
-  knowing before that pass: no BGM-specific next-track preloader (a real, if usually brief,
-  resolution gap on auto-advance, unlike the fixed playlists' gapless transition).
+  fresh channel scan (matching the original repro) and confirmed BGM now plays quickly.
+
+  **Second full `/qc` pass, 2026-08-10**: 10 of 11 scenarios passed cleanly (resume-a-restored-
+  session, BGM track list shape, Next, Previous, Next-after-Previous discard-forward, click-a-
+  history-entry, Reset, listen-count increment — cross-checked directly against `bgm-pool.json` —
+  master volume during BGM, and restore-on-relaunch). One scenario failed: switching away from BGM
+  to a fixed playlist and back duplicated the resumed track in the session history/track list.
+  Reopened and fixed as `bgm-006`'s second pass (see that issue's "Fix (2026-08-10, second pass)"
+  note and the `PlaybackController.swift` entry above) — `switchToBGM()` now resumes an
+  already-known track in place instead of always appending. Re-verified live with two repeated
+  switch-away/switch-back round-trips on the packaged app; no more duplicates. **Still not
+  qc-passed** — this run confirmed the fix works but per this skill's own process a fix doesn't
+  auto-promote the feature to `qc-passed`; a fresh confirmation `/qc` pass (or at minimum
+  re-running the one previously-failing scenario) is what would actually close this out.
+  `bgm-006`'s Notes list the remaining deliberate scope decisions worth knowing: no BGM-specific
+  next-track preloader (a real, if usually brief, resolution gap on auto-advance, unlike the fixed
+  playlists' gapless transition).
 
 Known gaps worth knowing about, not blockers:
 - **Visual/interactive UI verification turned out to be possible after all**, just not via

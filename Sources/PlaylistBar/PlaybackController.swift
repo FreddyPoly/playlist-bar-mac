@@ -222,7 +222,6 @@ final class PlaybackController: ObservableObject {
         currentPlaylist = Self.bgmPlaylist
         currentIndex = nil
         tracks = []
-        bgmHistoryPosition = nil
 
         await bgmLoader.load()
         guard generation == switchGeneration else { return }
@@ -239,7 +238,24 @@ final class PlaybackController: ObservableObject {
             ?? BGMSelector.selectNext(from: pool, excluding: nil)
 
         guard let startTrack else { return }
-        await playBGM(startingFrom: startTrack, generation: generation, appendToHistory: true)
+
+        // The saved position is almost always already present in this session's `bgmHistory` —
+        // either it's the entry `restoreBGMSession()` seeded at launch, or something actually
+        // played earlier this session before switching away to a fixed playlist and back (every
+        // `playBGM` call persists the saved position, and every path that reaches `playBGM` either
+        // just appended its track to `bgmHistory` or replayed one already in it). Resuming that
+        // video should replay it in place, not duplicate it at the end of history — only a
+        // genuinely new pick (nothing saved yet, or `bgmHistory` is still empty this session) grows
+        // it.
+        if let existingIndex = bgmHistory.firstIndex(where: { $0.videoID == startTrack.videoID }) {
+            bgmHistoryPosition = existingIndex == bgmHistory.count - 1 ? nil : existingIndex
+            await playBGM(
+                startingFrom: bgmHistory[existingIndex], generation: generation, appendToHistory: false
+            )
+        } else {
+            bgmHistoryPosition = nil
+            await playBGM(startingFrom: startTrack, generation: generation, appendToHistory: true)
+        }
     }
 
     /// Picks a new BGM video (excluding whatever's currently playing, per `BGMSelector`) and
