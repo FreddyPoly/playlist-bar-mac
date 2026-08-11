@@ -513,12 +513,16 @@ playback failure in `StreamResolver` and the `SMAppService` bundle-identity requ
 
 ## Status
 
-All 36 issues across the original 9 features are implemented (`issues/volume-control/` grew from 2
-to 8 issues on 2026-08-09 to cover automatic loudness normalization — see below — and all 8 are
-now done); QC (the `qc` skill's human test pass against `issues/FEATURES.md`) is in progress,
-started 2026-08-09. A 10th feature, **bgm**, was added 2026-08-10 (11 issues, done — see its own
-entry below) and had a first QC attempt blocked by a real startup-latency bug, since fixed; still
-needs a fresh full QC pass of its own.
+All 56 issues across all 10 features are implemented, and — as of 2026-08-11 — **every feature in
+`issues/FEATURES.md` is `qc-passed`**: the project has cleared per-feature QC (the `qc` skill's
+human test pass, started 2026-08-09). `issues/volume-control/` grew from 2 to 8 issues on
+2026-08-09 to cover automatic loudness normalization (see below); a 10th feature, **bgm**, was
+added 2026-08-10 (13 issues after gaining 2 more on 2026-08-11, done — see its own entry below)
+and had a first QC attempt blocked by a real startup-latency bug, since fixed, before eventually
+reaching `qc-passed` on its third pass. "Every feature `qc-passed`" isn't the same as "gap-free" —
+see the accepted/deferred gaps noted in the `playback-engine`, `startup`/`system-integration`, and
+"Known gaps" entries below — and a full-project `/security-review` across the whole codebase is
+still recommended (not yet run) before considering this release-ready.
 
 - **app-shell**: `qc-passed`.
 - **playlist-data**: `qc-passed` (2026-08-09). Full pass against the real playlists: cache-first
@@ -526,8 +530,8 @@ needs a fresh full QC pass of its own.
   stale-cache (>24h) background refresh actually replacing the on-disk cache, cache integrity
   surviving a failed background refresh, and safe plain-text rendering of CJK/ampersand track
   titles. The mid-pass block from the earlier menu-bar-ui display bugs is resolved.
-- **menu-bar-ui**: back to `ready-for-qc` (2026-08-09), 6/6 done, needs a fresh full pass (not yet
-  re-run). History: an earlier pass found and fixed two rendering bugs (menu-bar-ui-003/004, see
+- **menu-bar-ui**: `qc-passed` (2026-08-09), 6/6 done. History: an earlier pass found and fixed
+  two rendering bugs (menu-bar-ui-003/004, see
   their "Fix (2026-08-09)" notes) and passed all 7 scenarios including a live yt-dlp-absent/
   relaunch test. A follow-up scenario during playlist-data QC — disabling yt-dlp *mid-session*
   (not just at launch) — then caught two more real bugs in menu-bar-ui-005's error handling:
@@ -537,60 +541,81 @@ needs a fresh full QC pass of its own.
   gained and completed a new issue, `menu-bar-ui-006` (loading/buffering visual feedback across
   playlist-switch/fresh-resolve/stall wait moments, consuming `playback-engine-005`'s `isBuffering`
   signal) — see the `ContentView.swift` entry above; verified live.
-- **playback-engine**: `qc-passed` (2026-08-09, fresh full pass via `/qc`). Covered: basic
-  playback, natural-end auto-advance, gapless preload, rapid manual Previous/Next/track-click
-  navigation. The natural-end auto-advance scenario **failed on first try** — stuck loading
-  spinner, no advance — but investigation traced it to a real bug in `volume-control-007`'s code
-  (a `withTaskGroup` race that never actually bounded latency), not to anything in
-  `playback-engine` itself; see `volume-control-007`'s "QC feedback" note and the
-  `LoudnessGainCoordinator.swift` entry above for the full writeup. Fixed and re-verified live,
-  after which the scenario passed cleanly. Unavailable-track auto-skip (`playback-engine-004`)
-  couldn't be forced live — no UI path to inject a fake video id into a fixed real playlist — so
-  that scenario relies on its existing standalone-script verification instead; noted as a gap,
-  not silently skipped. Earlier history: QC had previously caught auto-advance silently not
-  happening on a real full-length natural playthrough; first diagnosis (YouTube CDN throttling)
-  turned out to be **wrong** — corrected once the real cause was found while implementing
-  `playback-engine-005`: `AVFoundation` miscalculates duration (~2x too long) for these streams,
-  so real audio played correctly then went genuinely silent for a long stretch before the app
-  recognized the track as over. Fixed with a trusted-duration watchdog fed by yt-dlp's own
-  metadata instead of `AVFoundation`'s broken one — see `AudioPlayer.swift`/`StreamResolver.swift`
-  above and playback-engine-005's "Fix" note. Verified both via a standalone script (145.0s vs the
-  old 284.7s for a real previously-broken track) and live. App Nap prevention (added mid-
-  investigation) is real hardening worth keeping, but wasn't the actual cause either. Gained a new
-  issue, `playback-engine-006` (seek-to-a-start-position-on-load with a near-end clamp, part of
-  the 2026-08-11 per-track seek-position-resume backlog addition — see SPEC.md), done 2026-08-11 —
-  see the `AudioPlayer.swift` entry above. As of `playback-controller-006` (done 2026-08-11), the
-  4 fixed playlists' playlist-switch path now does pass a real `startTime` — this feature's
-  `qc-passed` status above still reflects behavior as it was last actually re-tested, and hasn't
-  been re-verified live against the new resume behavior yet (see the `PlaybackController.swift`
-  entry above for what's verified so far vs. still deferred to a future `/qc` pass).
-- **player-state, playback-controller, startup, system-integration**: still `ready-for-qc`, not
-  yet started. `player-state` gained and completed a new issue, `player-state-003` (per-playlist
-  seek-position persistence, part of the 2026-08-11 resume backlog — see SPEC.md), done
-  2026-08-11 — see the `PlayerState.swift` entry above. `playback-controller` similarly gained and
-  completed `playback-controller-006` (persist/resume per-track seek position for the 4 fixed
-  playlists), done 2026-08-11 — see the `PlaybackController.swift` entry above; not yet
-  live-verified (deferred to a future `/qc` pass, same as `player-state-003`/`playback-engine-006`
-  above).
-- **volume-control**: `ready-for-qc` (2026-08-09), 8/8 done, never yet QC'd (new feature).
-  Reframed 2026-08-09 (see SPEC.md's "Volume & loudness normalization"): two independent gain
-  stages — a manual app-wide **master trim** (`001`/`002`) and automatic **per-track loudness
-  normalization** (`003`–`008`) via `ffmpeg`'s `loudnorm` filter, cut-only toward -14 LUFS, cached
-  permanently per track (`PlaylistCache.swift`), folded into the existing next-track preloader so
-  forward listening never waits on it (`NextTrackPreloader.swift`,
-  `LoudnessGainCoordinator.swift`), with a bounded 5s wait-then-fallback for out-of-order jumps
-  (`PlaybackController.swift`) surfaced via the existing loading spinner (`ContentView.swift`).
-  See the `Layout` entries above for each piece. **Not yet QC'd as its own feature** — but a real
-  bug in it was already found, fixed, and live-verified on 2026-08-09 as a side effect of
-  `playback-engine`'s QC (see `volume-control-007`'s "QC feedback" note and the
-  `LoudnessGainCoordinator.swift` entry above): a `withTaskGroup`-based timeout race that never
-  actually bounded latency in practice. `ffmpeg` is now installed on this machine and confirmed
-  working end-to-end. Still worth knowing: whether a persistently-missing `ffmpeg` should get a UI
-  banner (like `menu-bar-ui-005`'s yt-dlp one) or just silently degrade (every track plays
-  unnormalized) was deliberately left an open question in `volume-control-003`'s Notes, not
-  decided — currently it silently degrades, which may or may not be the right call.
-- **bgm**: `ready-for-qc` (2026-08-10), 13/13 done — added 2026-08-10 (see SPEC.md's "BGM channel
-  playback"), a
+- **playback-engine**: `qc-passed` (originally 2026-08-09; re-confirmed with a fresh full pass
+  2026-08-11 after `playback-engine-006` landed). 2026-08-09 pass covered: basic playback,
+  natural-end auto-advance, gapless preload, rapid manual Previous/Next/track-click navigation.
+  The natural-end auto-advance scenario **failed on first try** that day — stuck loading spinner,
+  no advance — but investigation traced it to a real bug in `volume-control-007`'s code (a
+  `withTaskGroup` race that never actually bounded latency), not to anything in `playback-engine`
+  itself; see `volume-control-007`'s "QC feedback" note and the `LoudnessGainCoordinator.swift`
+  entry above for the full writeup. Fixed and re-verified live, after which the scenario passed
+  cleanly. Earlier history: QC had previously caught auto-advance silently not happening on a real
+  full-length natural playthrough; first diagnosis (YouTube CDN throttling) turned out to be
+  **wrong** — corrected once the real cause was found while implementing `playback-engine-005`:
+  `AVFoundation` miscalculates duration (~2x too long) for these streams, so real audio played
+  correctly then went genuinely silent for a long stretch before the app recognized the track as
+  over. Fixed with a trusted-duration watchdog fed by yt-dlp's own metadata instead of
+  `AVFoundation`'s broken one — see `AudioPlayer.swift`/`StreamResolver.swift` above and
+  playback-engine-005's "Fix" note. Verified both via a standalone script (145.0s vs the old
+  284.7s for a real previously-broken track) and live. App Nap prevention (added mid-investigation)
+  is real hardening worth keeping, but wasn't the actual cause either.
+  **2026-08-11 re-pass** (after `playback-engine-006`, seek-to-start-position with near-end clamp,
+  landed as part of the per-track seek-position-resume backlog — see SPEC.md): live-verified basic
+  playback, pause/resume, manual Next, and — the new behavior — resuming a track's saved position
+  after switching playlists away and back (confirmed audibly resuming mid-track, not at 0:00).
+  Natural end-of-track auto-advance was **not** re-run this pass (by user decision — nothing in
+  that code path changed since its thorough 2026-08-09 live verification above, not worth several
+  more minutes of real playback to reconfirm unchanged behavior).
+  **Two accepted, permanently-deferred gaps** (explicit user decision 2026-08-11, not planned to be
+  revisited): the near-end clamp (a saved position within ~5s of a track's end should resume at
+  0:00 instead) has no practical live-test path — this app deliberately has no visible
+  duration/scrub UI (see SPEC.md), so there's no way to time a manual test precisely — user judged
+  this low-stakes (won't break anything if it's ever wrong) and accepted the existing standalone-
+  script verification (see `playback-engine-006`'s Notes) as sufficient, permanently, not just for
+  this pass. Unavailable-track auto-skip (`playback-engine-004`) has no UI path to inject a fake/
+  dead video id into a real fixed playlist to force it live — user accepted the existing
+  standalone-script verification (see that issue's Notes) as sufficient here too. Both are
+  deliberately *not* being carried forward as open action items in future `/qc` passes.
+- **player-state**: `qc-passed` (2026-08-11, first full pass — previously `ready-for-qc`/
+  `not-ready`, never tested as its own feature before). `player-state-001`/`002` (last-played-
+  track and last-active-playlist persistence) and the newer `player-state-003` (seek-position
+  persistence, part of the 2026-08-11 resume backlog) were all live-verified together via an
+  actual Quit + relaunch (not just switching playlists while the app stays running, which
+  `playback-engine`'s pass above already covered): the restored playlist, track, and seek position
+  all matched what was left before quitting, with no auto-play, and a never-before-played playlist
+  correctly defaulted to track 1.
+- **playback-controller**: `qc-passed` (2026-08-11, first full pass — previously `ready-for-qc`/
+  `not-ready`). Live-verified: clean playlist-switch handoff (no overlapping audio), Previous/Next
+  wrap-around at both ends, Reset (jumps to track 1 at 0:00 even from a non-zero position
+  elsewhere), click-to-play from the track list (starts fresh at 0:00), and the newer
+  `playback-controller-006` resume wiring — specifically confirmed the interaction the issue's own
+  Notes had flagged as not yet live-tested: after a fresh navigation action (click-to-play) resets
+  a track's saved position, switching away and back correctly resumes at the *new* elapsed
+  position, not a stale earlier one.
+- **startup, system-integration**: `qc-passed` (2026-08-09), unchanged this round.
+  **System media-key testing, previously an open gap** (`MPRemoteCommandCenter` targets were
+  confirmed registered/enabled, but an actual key press was never simulated) **is now resolved**:
+  user pressed the real play/pause media key during the 2026-08-11 QC session and confirmed it
+  works correctly. F7/F8 (previous/next track) still haven't been physically pressed — narrower
+  remaining gap than before, not reopened as a blocker.
+- **volume-control**: `qc-passed` (2026-08-09), unchanged this round. Reframed 2026-08-09 (see
+  SPEC.md's "Volume & loudness normalization"): two independent gain stages — a manual app-wide
+  **master trim** (`001`/`002`) and automatic **per-track loudness normalization** (`003`–`008`)
+  via `ffmpeg`'s `loudnorm` filter, cut-only toward -14 LUFS, cached permanently per track
+  (`PlaylistCache.swift`), folded into the existing next-track preloader so forward listening never
+  waits on it (`NextTrackPreloader.swift`, `LoudnessGainCoordinator.swift`), with a bounded 5s
+  wait-then-fallback for out-of-order jumps (`PlaybackController.swift`) surfaced via the existing
+  loading spinner (`ContentView.swift`). See the `Layout` entries above for each piece. A real bug
+  in it was found, fixed, and live-verified on 2026-08-09 as a side effect of `playback-engine`'s
+  QC (see `volume-control-007`'s "QC feedback" note and the `LoudnessGainCoordinator.swift` entry
+  above): a `withTaskGroup`-based timeout race that never actually bounded latency in practice.
+  `ffmpeg` is now installed on this machine and confirmed working end-to-end. Still worth knowing:
+  whether a persistently-missing `ffmpeg` should get a UI banner (like `menu-bar-ui-005`'s yt-dlp
+  one) or just silently degrade (every track plays unnormalized) was deliberately left an open
+  question in `volume-control-003`'s Notes, not decided — currently it silently degrades, which
+  may or may not be the right call.
+- **bgm**: `qc-passed` (2026-08-11, see the third pass below), 13/13 done — added 2026-08-10 (see
+  SPEC.md's "BGM channel playback"), a
   5th playlist-picker entry that plays random 15+ minute, non-members-only videos from a pool of
   YouTube channels, weighted toward whichever's been listened to least locally. All 11 issues are
   implemented — see the `Layout` entries above (`BGMCache.swift`, `BGMChannelScanner.swift`,
@@ -629,10 +654,27 @@ needs a fresh full QC pass of its own.
   backlog — see SPEC.md's "Local state (per playlist)"): `bgm-012` (persist/resume BGM's saved
   seek position) and `bgm-013` (measure the listen-count threshold relative to resume, not
   absolute position) — see the `PlaybackController.swift`/`BGMListenTracker.swift` entries above.
-  Neither has been live-verified yet (deferred to a future `/qc` pass, same as every other issue
-  in this backlog addition — see `playback-controller-006`'s entry above); a fresh full `/qc` pass
-  was already owed to this feature before these landed, so it now additionally needs to cover
-  BGM's resume behavior and the listen-count-threshold fix.
+
+  **Third full `/qc` pass, 2026-08-11 — now `qc-passed`**: all 11 scenarios passed, including full
+  re-confirmation of everything the second pass covered (select-BGM startup speed, track-list
+  shape, Next, Previous, Next-after-Previous discards forward history, click-a-history-entry,
+  Reset, master volume, switch-away-and-back with no duplicate history entry) plus the two new
+  behaviors from `bgm-012`/`bgm-013`: resuming BGM's saved position both via a live switch-away/
+  switch-back *and* via an actual Quit+relaunch (both confirmed audibly resuming mid-video, not at
+  0:00), and the listen-count threshold now being measured relative to the resume point — verified
+  directly against `bgm-pool.json`: a video resumed at ~75s (already past the 30s absolute
+  threshold) held at its pre-resume listen count immediately after resuming, then correctly
+  incremented only after ~30s of *additional* real playback since the resume. This is the feature's
+  first time reaching `qc-passed` — the second pass above found and fixed a real bug but a fix
+  doesn't auto-promote status per this skill's own process, and a confirmation pass was still owed
+  even before `bgm-012`/`bgm-013` added new scope to it.
+
+With this pass, **every feature in `issues/FEATURES.md` is `qc-passed`** as of 2026-08-11 — the
+project has cleared per-feature QC. That doesn't mean gap-free, though (see the accepted gaps under
+`playback-engine` above and "Known gaps" below) — and a full-project `/security-review` (or the
+multi-agent `ultrareview`) across the whole codebase, not just per-issue diffs, is still
+recommended before considering this release-ready; not run yet, since it's a deliberate,
+potentially billed pass rather than something to trigger unprompted.
 
 Known gaps worth knowing about, not blockers:
 - **Visual/interactive UI verification turned out to be possible after all**, just not via
@@ -653,6 +695,12 @@ Known gaps worth knowing about, not blockers:
   running the real `/code-review` command yourself over the current diff, and setting up a remote
   so `/security-review` can run too, would likely catch
   more than the manual passes have.
-- **System media-key/Control Center testing is unverified** — `MPRemoteCommandCenter` targets are
-  confirmed registered and enabled, but an actual F7/F8/F9 press wasn't simulated (no way to do
-  so without Accessibility/hardware access).
+- **System media-key play/pause is now live-verified** (2026-08-11) — previously an open gap
+  (`MPRemoteCommandCenter` targets confirmed registered/enabled, but no real key press simulated).
+  F7/F8 (previous/next track) specifically still haven't been pressed — narrow remaining gap, not
+  a blocker.
+- **Near-end seek-position clamp and unavailable-track auto-skip are permanently accepted as
+  standalone-script-verified-only** (explicit user decision, 2026-08-11) — not live-testable in
+  practice (no scrub/duration UI for the former, no way to inject a dead video id into a real
+  playlist for the latter) and judged low-stakes enough not to be worth chasing further. Not
+  planned to be reopened in future `/qc` passes.
