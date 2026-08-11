@@ -69,6 +69,11 @@ observable). Same PATH-hardening as `yt-dlp` above — see `FfmpegAvailability.s
   label is built as an explicit `HStack { Image(systemName:); Text(menuBarTitle) }`, not
   `Label(_:systemImage:)` — a `MenuBarExtra` status item doesn't reliably render `Label`'s title
   text next to its icon (collapses to icon-only); found via QC on 2026-08-09, see menu-bar-ui-004.
+  `menuBarTitle`'s truncation length was halved from 40 to 20 characters (2026-08-11, user report:
+  the untruncated title was long enough to sometimes cover the system menu bar's battery icon) —
+  confirmed via `/interview` that the more aggressive truncation this causes (e.g. "Never Gonna
+  Give You Up" becoming "Never Gonna Give You…") is an acceptable tradeoff against covering system
+  status icons.
 - `Sources/PlaylistBar/ContentView.swift` — the dropdown: yt-dlp-missing / error messaging,
   playlist `Picker`, transport buttons (Previous/Play-Pause/Next/Reset), the previous-5/current/
   next-5 track list (click any row to jump to it), a Launch-at-Login `Toggle`, and Quit. All

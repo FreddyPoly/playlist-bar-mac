@@ -35,7 +35,7 @@ struct PlaylistBarApp: App {
             return "Playlist Bar"
         }
         let title = controller.tracks[index].title
-        let maxLength = 40
+        let maxLength = 20
         guard title.count > maxLength else { return title }
         return String(title.prefix(maxLength)) + "…"
     }
