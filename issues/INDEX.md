@@ -13,13 +13,16 @@
 | playback-engine-003 | Next-track preloading | done | false | agent | playback-engine-001, playback-engine-002 |
 | playback-engine-004 | Unavailable-track auto-skip | done | false | agent | playback-engine-001, playback-engine-003 |
 | playback-engine-005 | Feedback/resilience for throttled stream delivery | done | false | agent | playback-engine-001, playback-engine-002 |
+| playback-engine-006 | Seek to a start position on load, with near-end clamp | open | false | agent | playback-engine-002, playback-engine-005 |
 | player-state-001 | Per-playlist last-played-track persistence | done | false | agent | |
 | player-state-002 | Last active playlist persistence | done | false | agent | player-state-001 |
+| player-state-003 | Per-playlist last-played seek-position persistence | open | false | agent | player-state-001 |
 | playback-controller-001 | Playlist switch orchestration | done | false | agent | playlist-data-003, playback-engine-002, player-state-001 |
 | playback-controller-002 | Previous/Next with wrap-around | done | false | agent | playback-controller-001, player-state-001 |
 | playback-controller-003 | Reset control | done | false | agent | playback-controller-002 |
 | playback-controller-004 | Auto-advance on track completion | done | false | agent | playback-controller-002, playback-engine-004 |
 | playback-controller-005 | Click-to-play from track list | done | false | agent | playback-controller-001 |
+| playback-controller-006 | Persist and resume per-track seek position for the 4 fixed playlists | open | false | agent | player-state-003, playback-engine-006, playback-controller-001 |
 | menu-bar-ui-001 | Playlist selector dropdown | done | false | agent | playback-controller-001 |
 | menu-bar-ui-002 | Transport controls | done | false | agent | playback-controller-002, playback-controller-003 |
 | menu-bar-ui-003 | Track list (previous 5 / current / next 5) | done | false | agent | playback-controller-005, playlist-data-003 |
@@ -49,3 +52,5 @@
 | bgm-009 | Restore last-played BGM video on relaunch without auto-play | done | false | agent | bgm-006, startup-002 |
 | bgm-010 | "BGM" entry in the playlist selector dropdown | done | false | agent | bgm-006, menu-bar-ui-001 |
 | bgm-011 | BGM track list — history + current, no "next" slot | done | false | agent | bgm-005, bgm-006, bgm-007 |
+| bgm-012 | Persist and resume BGM's saved seek position | open | false | agent | player-state-003, playback-engine-006, bgm-006, bgm-009 |
+| bgm-013 | Measure listen-count threshold relative to resume, not absolute position | open | false | agent | bgm-005, bgm-012 |

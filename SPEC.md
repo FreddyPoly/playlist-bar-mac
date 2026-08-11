@@ -55,7 +55,12 @@ separate picker entry — a deliberate choice over one-picker-entry-per-channel.
 - **What counts as a "listen"**: a qualifying video's local listen count increments once
   continuous playback of it passes `min(30s, 20% of its duration)` — long enough that an
   accidental skip doesn't inflate the count, short enough not to require finishing a 20-minute
-  track. Local to this player only; nothing is reported to YouTube or anywhere else.
+  track. Local to this player only; nothing is reported to YouTube or anywhere else. Measured as
+  **elapsed playback time since this listen started**, not absolute position in the track — so
+  resuming a BGM video mid-way via saved-position resume (see "Local state (per playlist)" below)
+  still requires listening `min(30s, 20%)` further before it counts, the same as starting fresh;
+  it is not instantly credited just because the resumed position happens to already be past that
+  threshold.
 - **Caching & merge**: channel scans are cached and refreshed on the same 24h-staleness pattern
   as the 4 fixed playlists (see "Playlist data & caching"), but — unlike that cache, which fully
   replaces its track list on every rescan — a BGM rescan **merges** by video id: local listen
@@ -195,16 +200,41 @@ Stored locally (JSON, in the same Application Support directory), no database, n
 
 - Last-played track (video ID) per playlist — updated on every track change (play, prev, next,
   reset, or clicking a track in the list), so quitting/relaunching preserves exact position.
+- **Last-played timestamp (seek position) per playlist** (added 2026-08-11): alongside the
+  video ID above, the exact elapsed position (seconds) within that track is also saved — one
+  value per playlist slot, tied to whichever track is currently the "last played" one (not a
+  history of positions per track; switching to a different track discards the old track's saved
+  position, same single-value-per-slug model as the video ID itself). Applies to all 5 playlist
+  slots: the 4 fixed playlists and BGM.
+  - **Write cadence**: a periodic save every ~5s while playing, plus event-driven saves on pause,
+    switching away from the playlist, and track change — mirrors this app's existing 1Hz-timer
+    pattern (`BGMListenTracker`). No flush-on-quit hook (`Quit` calls
+    `NSApplication.terminate(nil)` directly, unchanged) — a clean Quit has the same up-to-~5s
+    loss window as a crash or force-quit; deliberately kept simple rather than adding an
+    `applicationWillTerminate` hook for this.
+  - **When it's applied**: any time that saved track is (re)loaded — a cold-start relaunch and a
+    live switch-away-and-back within the same run both seek to the saved position, via the same
+    `play()`/restore path. Not relaunch-only.
+  - **Near-end clamp**: if the saved position is within ~5s of the track's known duration (the
+    same trusted yt-dlp duration `AudioPlayer`'s end-of-track watchdog already uses — see
+    "Playback engine" below), resume clamps to 0:00 instead of replaying a few seconds and
+    instantly auto-advancing, which would read as a bug.
+  - **No visible seek/scrub UI** — this is background-only resume; the dropdown still shows no
+    duration or progress bar (see "UI (menu bar dropdown)" below), unchanged.
 - Which playlist was last active (used to restore state on next launch).
 - Master volume trim (app-wide, not per-playlist) — persists across quit/relaunch like the rest
   of this state. Added 2026-08-09. Per-track normalization gain is separate persisted state, kept
   in the playlist cache rather than here — see "Volume & loudness normalization" above.
 - **BGM**, added 2026-08-10: last-played video (id) is persisted the same way as the 4 fixed
   playlists' last-played track, so relaunch restores and displays it (without auto-playing — see
-  "Startup / Login item") rather than picking fresh. Each pooled video's local listen count is
-  also persisted (alongside its cached channel-scan entry — see "BGM channel playback"). The
-  **session Previous history** (the list of videos actually played this run, used to walk
-  backward — see "Behavior rules") is **not** persisted; it starts empty on every launch.
+  "Startup / Login item") rather than picking fresh. As of 2026-08-11 its saved position (see
+  above) is restored the same way, too — but BGM's listen-count threshold is measured relative to
+  elapsed time since the resume, not absolute position (see "BGM channel playback" — "What counts
+  as a listen"), so resuming near the end of a long video doesn't instantly credit a listen. Each
+  pooled video's local listen count is also persisted (alongside its cached channel-scan entry —
+  see "BGM channel playback"). The **session Previous history** (the list of videos actually
+  played this run, used to walk backward — see "Behavior rules") is **not** persisted; it starts
+  empty on every launch.
 
 ## UI (menu bar dropdown)
 
@@ -230,7 +260,9 @@ Stored locally (JSON, in the same Application Support directory), no database, n
     list) plus the current track highlighted. No "next" slot at all. Each visible BGM entry
     (history + current) shows its local listen count next to the title, so the
     fewest-listens-wins selection is visible rather than a black box.
-  - No duration display, no seek/progress bar — just title + play/pause state.
+  - No duration display, no seek/progress bar — just title + play/pause state. (Resuming at a
+    saved position, added 2026-08-11, is background-only — see "Local state (per playlist)" — and
+    doesn't change this: still no visible scrubber or elapsed-time readout.)
   - Loading/buffering feedback — a visible state (not just a static Play/Pause icon) whenever
     audio isn't actually flowing but the app is working on it: switching playlists (cache scan in
     progress), resolving a fresh track's stream, recovering from a mid-stream stall, or waiting on
@@ -243,12 +275,14 @@ Stored locally (JSON, in the same Application Support directory), no database, n
 ## Behavior rules
 
 - **Switching playlists**: loads instantly from cache, resumes the saved last-played track for
-  that playlist (or track 1 if never played before), and starts playing immediately.
+  that playlist (or track 1 if never played before) **at its saved position** (or 0:00 if never
+  played, or if the saved position was within ~5s of the end — see "Local state (per playlist)"),
+  and starts playing immediately.
 - **Previous / Next**: step by playlist index. At either end they **wrap around** (Previous on
   track 1 → last track; Next on the last track, including auto-advance at end of playlist → track
-  1), so a playlist loops continuously.
-- **Reset**: jumps to track 1 of the current playlist and plays it; this becomes the new saved
-  position.
+  1), so a playlist loops continuously. Each lands at 0:00 (a fresh track), not a saved position.
+- **Reset**: jumps to track 1 of the current playlist and plays it from 0:00; this becomes the new
+  saved position (0:00).
 - **Auto-advance**: when a track finishes, automatically plays the next track (same wrap-around
   rule).
 - **Unavailable tracks** (deleted/private/region-locked): automatically skipped on play or
@@ -278,7 +312,9 @@ Stored locally (JSON, in the same Application Support directory), no database, n
 
 - Toggle in the app to enable/disable "Launch at Login" (via `SMAppService`).
 - When launched at login, the app opens **idle/paused** — it restores the last active playlist
-  and track selection but does **not** auto-play. Avoids music starting unexpectedly on boot.
+  and track selection but does **not** auto-play. Avoids music starting unexpectedly on boot. The
+  first Play press after that restore resumes at the saved position (see "Local state (per
+  playlist)"), not 0:00.
 
 ## Native macOS integration
 
@@ -318,7 +354,9 @@ Low risk, small surface:
   warranted. BGM's per-video local listen counts (added 2026-08-10) are the same kind of data —
   video ids and play counts, nothing that identifies Frederic beyond what the rest of the app's
   local state already does — stored the same unencrypted way; confirmed with Frederic as an
-  acceptable risk level with no extra protection needed.
+  acceptable risk level with no extra protection needed. The per-playlist saved seek position
+  (added 2026-08-11) is the same category again — a plain number of elapsed seconds alongside a
+  video id already being stored — no new sensitivity introduced.
 - **BGM channel scanning** (added 2026-08-10): uses the same `yt-dlp --flat-playlist` mechanism,
   same trust boundary, and same public/read-only access as the 4 fixed playlists — no new
   authentication surface. Filtering out members-only ("subscriber_only") videos relies on that
