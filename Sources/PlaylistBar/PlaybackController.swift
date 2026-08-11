@@ -112,6 +112,17 @@ final class PlaybackController: ObservableObject {
     /// normal network conditions without making an out-of-order jump feel sluggish.
     private static let loudnessAnalysisTimeout: Duration = .seconds(5)
 
+    /// How often the current fixed-playlist track's position is saved while playing — the
+    /// periodic half of player-state-003/playback-controller-006's "roughly every 5 seconds, plus
+    /// event-driven saves on pause/switch-away/track-change" write cadence. Matches the ~5s
+    /// SPEC.md figure directly (`SPEC.md#local-state-per-playlist`).
+    private static let positionSaveInterval: TimeInterval = 5.0
+
+    /// Periodic position-save timer — armed once for the app's lifetime (not per-track, unlike
+    /// `BGMListenTracker`'s timer) since its callback already gates on `isPlaying`/`isBGMActive`/
+    /// `hasLoadedCurrentTrack`, so there's nothing to start/stop per track change.
+    private var positionSaveTimer: Timer?
+
     init() {
         masterVolume = PlayerStateStore.masterVolume()
         applyEffectiveVolume()
@@ -138,6 +149,29 @@ final class PlaybackController: ObservableObject {
         loader.onTracksUpdated = { [weak self] newTracks in
             self?.tracks = newTracks
         }
+
+        let timer = Timer(timeInterval: Self.positionSaveInterval, repeats: true) { [weak self] _ in
+            Task { @MainActor [weak self] in
+                guard let self, self.isPlaying else { return }
+                self.savePosition()
+            }
+        }
+        RunLoop.main.add(timer, forMode: .common)
+        positionSaveTimer = timer
+    }
+
+    deinit {
+        positionSaveTimer?.invalidate()
+    }
+
+    /// Saves the current track's elapsed position — for whichever of the 4 fixed playlists or BGM
+    /// (`bgm-012`) is currently active, via the same `currentPlaylist?.slug`/`hasLoadedCurrentTrack`
+    /// state both share. A no-op when nothing has actually been loaded into the player yet (e.g.
+    /// right after a restore, before the first Play press). Used by the periodic timer above plus
+    /// the explicit on-pause/on-switch-away event-driven saves.
+    private func savePosition() {
+        guard hasLoadedCurrentTrack, let slug = currentPlaylist?.slug else { return }
+        PlayerStateStore.setLastPlayedPosition(player.currentTime, forPlaylistSlug: slug)
     }
 
     /// Wires system-wide media keys (F7/F8/F9) and Control Center's media controls to the same
@@ -184,6 +218,8 @@ final class PlaybackController: ObservableObject {
     /// (instantly from cache when present), resumes its saved last-played track (or track 1 if
     /// never played), and starts playing immediately.
     func switchTo(playlist: Playlist) async {
+        savePosition()
+
         switchGeneration += 1
         let generation = switchGeneration
 
@@ -202,7 +238,7 @@ final class PlaybackController: ObservableObject {
             return
         }
 
-        await play(startingAt: startIndex, generation: generation)
+        await play(startingAt: startIndex, generation: generation, resumePosition: true)
     }
 
     /// Switches to BGM: loads the pooled channel cache (bgm-003, cache-first), resumes the
@@ -211,6 +247,8 @@ final class PlaybackController: ObservableObject {
     /// always-autoplay behavior. Unlike `switchTo(playlist:)`, does **not** reset `bgmHistory` —
     /// see its own doc comment for why.
     func switchToBGM() async {
+        savePosition()
+
         switchGeneration += 1
         let generation = switchGeneration
 
@@ -250,11 +288,14 @@ final class PlaybackController: ObservableObject {
         if let existingIndex = bgmHistory.firstIndex(where: { $0.videoID == startTrack.videoID }) {
             bgmHistoryPosition = existingIndex == bgmHistory.count - 1 ? nil : existingIndex
             await playBGM(
-                startingFrom: bgmHistory[existingIndex], generation: generation, appendToHistory: false
+                startingFrom: bgmHistory[existingIndex], generation: generation, appendToHistory: false,
+                resumePosition: true
             )
         } else {
             bgmHistoryPosition = nil
-            await playBGM(startingFrom: startTrack, generation: generation, appendToHistory: true)
+            await playBGM(
+                startingFrom: startTrack, generation: generation, appendToHistory: true, resumePosition: true
+            )
         }
     }
 
@@ -323,8 +364,18 @@ final class PlaybackController: ObservableObject {
     /// BGM-specific published state — this is what makes `updateNowPlayingInfo()`, the menu bar
     /// title, and `applyEffectiveVolume()`/`currentTrackGain` all work correctly for BGM with no
     /// changes to any of them.
+    ///
+    /// `resumePosition` (bgm-012) mirrors `play(startingAt:generation:resumePosition:)`'s fixed-
+    /// playlist parameter: requests resuming BGM's saved seek position instead of 0:00, honored
+    /// only if the video actually played turns out to still be the one the saved position belongs
+    /// to (a retry-on-unavailable within this same call, or a caller passing a stale/different
+    /// `startingTrack`, must never inherit a position saved for a different video). Passed `true`
+    /// only by `switchToBGM()` and `togglePlayPause()`'s post-restore fallback (the cold-start-
+    /// relaunch case) — Next/Previous/history-click/auto-advance all keep the default `false`, so
+    /// they still start their landed-on video at 0:00 per SPEC.md's "Behavior rules".
     private func playBGM(
-        startingFrom startingTrack: BGMTrack, generation: Int, appendToHistory: Bool
+        startingFrom startingTrack: BGMTrack, generation: Int, appendToHistory: Bool,
+        resumePosition: Bool = false
     ) async {
         var candidate = startingTrack
         var excludedVideoIDs: Set<String> = []
@@ -379,6 +430,21 @@ final class PlaybackController: ObservableObject {
 
             errorMessage = nil
 
+            // Only honor the saved position if it actually belongs to the video we ended up
+            // playing — mirrors the fixed-playlist guard in `play(startingAt:generation:)`.
+            var startTime: Double?
+            if resumePosition,
+               PlayerStateStore.lastPlayedTrack(forPlaylistSlug: Self.bgmPlaylistSlug) == candidate.videoID {
+                startTime = PlayerStateStore.lastPlayedPosition(forPlaylistSlug: Self.bgmPlaylistSlug)
+            }
+            // Predicts `AudioPlayer.load`'s own near-end clamp, so both the persisted position
+            // below and `bgmListenTracker`'s elapsed-since-resume baseline (bgm-013) agree with
+            // where playback actually starts (0:00) rather than the pre-clamp `startTime`.
+            let isClamped = startTime.map { start in
+                duration.map { start >= $0 - AudioPlayer.nearEndClampSeconds } ?? false
+            } ?? false
+            let effectiveStartTime = isClamped ? 0 : (startTime ?? 0)
+
             // No per-track loudness normalization for BGM (revised 2026-08-10, see SPEC.md's
             // "BGM channel playback" — "Startup latency for long videos"): BGM now resolves a
             // progressive (audio+video) stream to fix a real startup-latency bug, and re-analyzing
@@ -387,11 +453,12 @@ final class PlaybackController: ObservableObject {
             // normalization gain 1.0 — `currentTrackGain` already falls back to that when a
             // track's `normalizationGain` is `nil`, which it now always is for BGM.
             applyEffectiveVolume()
-            player.load(url: url, duration: duration, autoplay: true)
+            player.load(url: url, duration: duration, startTime: startTime, autoplay: true)
             hasLoadedCurrentTrack = true
             isPlaying = true
 
             PlayerStateStore.setLastPlayedTrack(candidate.videoID, forPlaylistSlug: Self.bgmPlaylistSlug)
+            PlayerStateStore.setLastPlayedPosition(effectiveStartTime, forPlaylistSlug: Self.bgmPlaylistSlug)
             PlayerStateStore.setLastActivePlaylist(slug: Self.bgmPlaylistSlug)
 
             // A history walk-back (Previous, or clicking a past entry — bgm-007) replays a track
@@ -401,7 +468,7 @@ final class PlaybackController: ObservableObject {
                 bgmHistory.append(candidate)
             }
             bgmListenTracker.start(
-                videoID: candidate.videoID, duration: candidate.duration,
+                videoID: candidate.videoID, duration: candidate.duration, startPosition: effectiveStartTime,
                 currentTime: { [weak self] in self?.player.currentTime ?? 0 }
             )
             return
@@ -512,6 +579,7 @@ final class PlaybackController: ObservableObject {
         if isPlaying {
             player.pause()
             isPlaying = false
+            savePosition()
             return
         }
 
@@ -533,11 +601,13 @@ final class PlaybackController: ObservableObject {
             }
             switchGeneration += 1
             let generation = switchGeneration
-            await playBGM(startingFrom: candidate, generation: generation, appendToHistory: false)
+            await playBGM(
+                startingFrom: candidate, generation: generation, appendToHistory: false, resumePosition: true
+            )
         } else {
             switchGeneration += 1
             let generation = switchGeneration
-            await play(startingAt: index, generation: generation)
+            await play(startingAt: index, generation: generation, resumePosition: true)
         }
     }
 
@@ -641,6 +711,7 @@ final class PlaybackController: ObservableObject {
             isPlaying = true
             if let slug = currentPlaylist?.slug {
                 PlayerStateStore.setLastPlayedTrack(nextTrack.videoID, forPlaylistSlug: slug)
+                PlayerStateStore.setLastPlayedPosition(0, forPlaylistSlug: slug)
                 PlayerStateStore.setLastActivePlaylist(slug: slug)
             }
             beginPreloadForNext()
@@ -695,7 +766,16 @@ final class PlaybackController: ObservableObject {
     /// Resolves and plays the first actually-playable track from `index` onward (auto-skipping
     /// unavailable ones, see `TrackAvailabilityResolver`), persisting it as the new saved
     /// position. Does nothing if a newer `switchTo` has superseded this one in the meantime.
-    private func play(startingAt index: Int, generation: Int) async {
+    ///
+    /// `resumePosition` (playback-controller-006) requests resuming from the playlist's saved
+    /// seek position rather than starting at 0:00 — only honored if the track actually resolved
+    /// to is still the same one the saved position belongs to (an auto-skip to a different track,
+    /// e.g. because the original one became unavailable, must never inherit a stale position from
+    /// a different video). Passed `true` only by `switchTo(playlist:)` and by
+    /// `togglePlayPause()`'s post-restore fallback (the cold-start-relaunch resume case) — every
+    /// other caller (Previous/Next/Reset/track-list click/auto-advance) defaults to `false`,
+    /// always starting its landed-on track at 0:00 per SPEC.md's "Behavior rules".
+    private func play(startingAt index: Int, generation: Int, resumePosition: Bool = false) async {
         guard !tracks.isEmpty else { return }
 
         // Set optimistically before resolving so the track list stays visible (centered on the
@@ -759,12 +839,28 @@ final class PlaybackController: ObservableObject {
                 isAwaitingLoudnessAnalysis = false
             }
 
+            // Only honor the saved position if it actually belongs to the track we ended up
+            // resolving — an unavailable-track auto-skip can land on a different track than the
+            // one `resumePosition` was requested for, which must never inherit its position.
+            var startTime: Double?
+            if resumePosition, let slug = currentPlaylist?.slug, tracks.indices.contains(playableIndex),
+               PlayerStateStore.lastPlayedTrack(forPlaylistSlug: slug) == tracks[playableIndex].videoID {
+                startTime = PlayerStateStore.lastPlayedPosition(forPlaylistSlug: slug)
+            }
+
             applyEffectiveVolume()
-            player.load(url: url, duration: duration, autoplay: true)
+            player.load(url: url, duration: duration, startTime: startTime, autoplay: true)
             hasLoadedCurrentTrack = true
             isPlaying = true
             if let slug = currentPlaylist?.slug, tracks.indices.contains(playableIndex) {
                 PlayerStateStore.setLastPlayedTrack(tracks[playableIndex].videoID, forPlaylistSlug: slug)
+                // Predicts `AudioPlayer.load`'s own near-end clamp so a clamped resume persists 0
+                // (where playback actually started) rather than the pre-clamp `startTime`, which
+                // would otherwise stay wrong until the next periodic save corrects it.
+                let isClamped = startTime.map { start in
+                    duration.map { start >= $0 - AudioPlayer.nearEndClampSeconds } ?? false
+                } ?? false
+                PlayerStateStore.setLastPlayedPosition(isClamped ? 0 : (startTime ?? 0), forPlaylistSlug: slug)
                 PlayerStateStore.setLastActivePlaylist(slug: slug)
             }
             beginPreloadForNext()

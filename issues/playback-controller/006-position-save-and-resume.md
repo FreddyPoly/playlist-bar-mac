@@ -1,7 +1,7 @@
 ---
 id: playback-controller-006
 title: Persist and resume per-track seek position for the 4 fixed playlists
-status: open
+status: done
 security: false
 owner: agent
 depends_on: [player-state-003, playback-engine-006, playback-controller-001]
@@ -48,3 +48,44 @@ race) — in practice this falls out naturally as long as position saves and
 
 Does not apply to BGM — see `bgm-012` for BGM's equivalent wiring (different orchestration code:
 `switchToBGM`/`playBGM`/`restoreBGMSession` rather than `play(startingAt:)`).
+
+## Fix / Implementation notes (2026-08-11)
+
+Added a `PlaybackController`-lifetime (not per-track) periodic `Timer` (`positionSaveInterval =
+5.0`, same `Timer` + `RunLoop.main.add(_:forMode:)` + `Task { @MainActor in }` pattern as
+`BGMListenTracker`), gated in its callback on `isPlaying`; a shared `savePosition()` helper (also
+gated on `!isBGMActive`/`hasLoadedCurrentTrack`) is additionally called explicitly on pause
+(`togglePlayPause()`), and on switching away from the current playlist (top of `switchTo(playlist
+:)`/`switchToBGM()`, before any state mutation, so it captures the *outgoing* playlist's live
+position). Track-change saves (`setLastPlayedPosition(0, ...)`) were added next to both existing
+`setLastPlayedTrack` call sites for the non-resume paths — `play(startingAt:generation:)`'s
+success case and `advanceOnFinish`'s preloaded fast path.
+
+`play(startingAt:generation:resumePosition:)` gained the `resumePosition` parameter (default
+`false`), passed `true` only by `switchTo(playlist:)` and `togglePlayPause()`'s post-restore
+fallback (the cold-start-relaunch case) — every other caller (`step`/`reset`/`selectTrack`/
+`advanceOnFinish`'s fallback) keeps the default, so Previous/Next/Reset/track-click/auto-advance
+all still start at 0:00 per SPEC.md's "Behavior rules". When `resumePosition` is true, the saved
+position is only actually honored if `PlayerStateStore.lastPlayedTrack(forPlaylistSlug:)` still
+matches the *resolved* track's video id — guards against `TrackAvailabilityResolver` auto-skipping
+to a different track (the original became unavailable) inheriting a stale position that belongs to
+a different video, per this issue's own Notes above.
+
+`AudioPlayer.nearEndClampSeconds` was widened from `private` to internal so `PlaybackController`
+could predict the same near-end-clamp decision `AudioPlayer.load` makes internally — without this,
+persisting `startTime` as-is for a clamped (near-end) resume would leave a briefly-wrong position
+on disk (the track actually started at 0:00, not the pre-clamp value) until the next periodic save
+corrected it a few seconds later; found and fixed during this issue's own self-review, verified via
+the standalone script below.
+
+Verified: `swift build` passes; a standalone script (mirroring the two pure decision points —
+the video-id resume guard and the near-end-clamp persistence prediction — since the real logic
+lives in `@MainActor` methods wired to `AVPlayer`/yt-dlp/`PlayerStateStore` and isn't callable
+standalone) covers resume-honored/ignored-on-mismatch/ignored-when-not-requested/ignored-when-
+nothing-saved, plus clamp-vs-no-clamp persistence. `swift run` launches cleanly with no crash.
+**Not live-verified** (actually switching playlists in the running app and confirming audible
+resume-from-position) — this project's established pattern for GUI-observable behavior is a
+human-driven `/qc` pass (see CLAUDE.md's "Known gaps" note on visual/interactive verification);
+flagging this explicitly rather than claiming untested behavior works. `/code-review` unavailable
+for the same reason as every other issue here (agent-invocable only via explicit user run, no
+GitHub remote) — did a manual self-review pass instead.

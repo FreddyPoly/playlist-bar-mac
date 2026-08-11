@@ -1,7 +1,7 @@
 ---
 id: player-state-003
 title: Per-playlist last-played seek-position persistence
-status: open
+status: done
 security: false
 owner: agent
 depends_on: [player-state-001]
@@ -39,3 +39,24 @@ tied to whichever track is currently the "last played" one for that slot — swi
 different track discards the old track's saved position. It is the caller's responsibility (not
 this storage layer's) to only write a position that actually corresponds to the track currently
 recorded in `lastPlayedTrackByPlaylist` for that slug, so the two stay consistent.
+
+## Fix / Implementation notes (2026-08-11)
+
+Added `lastPlayedPositionByPlaylist: [String: Double]` plus `lastPlayedPosition(forPlaylistSlug:)`/
+`setLastPlayedPosition(_:forPlaylistSlug:)`, mirroring the existing track-id pair exactly.
+
+**Real bug found and fixed during this issue's own verification**: the acceptance criteria's
+"same pattern already used for `CachedTrack.normalizationGain`" note assumes Swift's synthesized
+`Decodable` applies a property's `= default` to a missing key the way it does for `Optional`
+fields — that's only true for `Optional` properties. A standalone script decoding a JSON object
+missing the new (non-Optional, dictionary) field threw instead of defaulting, and `load()`'s
+catch-all (`try? ... else { return State() }`) would have silently reset *every* field —
+last-played track, last-active playlist, master volume — not just the new one. This was
+**already latent** for `masterVolume` (added later, non-Optional, no custom decoder) against any
+`player-state.json` written before volume-control-001 — this issue's change would have been the
+second field to hit the same gap, so fixed both at once with a custom `init(from:)` using
+`decodeIfPresent(...) ?? <default>` for every field, rather than adding a second field-specific
+patch. Verified via a standalone script covering: round-trip with independent slugs, a
+"recent-old" JSON (has `masterVolume`, lacks the new position field), a "very-old" JSON (lacks
+`masterVolume` too), and a fully empty `{}` object — all decode to the expected values with no
+thrown error. `swift build` passes.

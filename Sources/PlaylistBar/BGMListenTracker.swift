@@ -25,7 +25,19 @@ final class BGMListenTracker {
     /// Arms tracking for `videoID` (whose duration is `duration`), polling `currentTime()`
     /// roughly once a second. Cancels any tracking already in progress first (a new `start()`
     /// implicitly abandons whatever was being tracked before, without incrementing it).
-    func start(videoID: String, duration: Double, currentTime: @escaping () -> Double) {
+    ///
+    /// Measures the threshold relative to *elapsed playback since this `start()` call*, not
+    /// `currentTime()`'s absolute value (bgm-012/bgm-013) — a video resumed already past the
+    /// absolute threshold (e.g. at 25:00 of a 30:00 video) must still require a real
+    /// `min(30s, 20%)` of playback from wherever it resumed before counting as a listen, exactly
+    /// like starting from 0:00 does. `startPosition` (default `0`, unaffected for every existing
+    /// from-the-beginning call site) is the caller's own *requested* start position, not read back
+    /// from `currentTime()` at this call — `AVPlayer.seek(to:)` is asynchronous, so `currentTime()`
+    /// generally still reads stale/zero for a split second right after `load()`/`seek()` return,
+    /// which would silently defeat this fix by capturing the wrong baseline.
+    func start(
+        videoID: String, duration: Double, startPosition: Double = 0, currentTime: @escaping () -> Double
+    ) {
         cancel()
         let requiredSeconds = Self.threshold(forDuration: duration)
         let timer = Timer(timeInterval: 1.0, repeats: true) { [weak self] _ in
@@ -34,7 +46,7 @@ final class BGMListenTracker {
             // scheduled on RunLoop.main, so hop explicitly rather than calling isolated members
             // directly from this synchronous context.
             Task { @MainActor [weak self] in
-                guard currentTime() >= requiredSeconds else { return }
+                guard currentTime() - startPosition >= requiredSeconds else { return }
                 BGMCacheStore.incrementListenCount(forVideoID: videoID)
                 self?.cancel()
             }

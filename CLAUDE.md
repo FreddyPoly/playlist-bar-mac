@@ -221,6 +221,44 @@ observable). Same PATH-hardening as `yt-dlp` above — see `FfmpegAvailability.s
   pool) still appends. See `bgm-006`'s "Fix (2026-08-10, second pass)" note for the full
   before/after and verification (a standalone script covering the live-edge and mid-history resume
   cases, plus a live repeated switch-away/switch-back check with the packaged app).
+  **Per-track seek-position save/resume for the 4 fixed playlists** (`playback-controller-006`,
+  2026-08-11, part of the per-track seek-position-resume backlog — see SPEC.md's "Local state (per
+  playlist)"): a `PlaybackController`-lifetime periodic `Timer` (5s interval, same pattern as
+  `BGMListenTracker`'s timer) plus a shared `savePosition()` helper — called on pause, and at the
+  top of `switchTo(playlist:)`/`switchToBGM()` (before any state mutation, so it captures the
+  *outgoing* playlist's live position) — persist the current position via
+  `PlayerStateStore.setLastPlayedPosition` (`player-state-003`). `play(startingAt:generation:
+  resumePosition:)` gained the `resumePosition` parameter (default `false`): `true` only from
+  `switchTo(playlist:)` and `togglePlayPause()`'s post-restore fallback (the cold-start-relaunch
+  case) — every other caller (`step`/`reset`/`selectTrack`/`advanceOnFinish`'s fallback) keeps
+  `false`, so Previous/Next/Reset/track-click/auto-advance still start at 0:00 per SPEC.md's
+  "Behavior rules". When honored, the saved position is only actually applied if
+  `PlayerStateStore.lastPlayedTrack(forPlaylistSlug:)` still matches the track
+  `TrackAvailabilityResolver` actually resolved to — guards against inheriting a stale position
+  when an unavailable-track auto-skip lands on a different video than the one the position was
+  saved for. `AudioPlayer.nearEndClampSeconds` (see below) was widened from `private` to internal
+  so this file can predict the same near-end clamp `AudioPlayer.load` applies internally, and
+  persist `0` (not the pre-clamp `startTime`) for a clamped resume — found and fixed during this
+  issue's own self-review; without it, a clamped resume would briefly persist a wrong position
+  until the next periodic save corrected it. Verified via a standalone script covering the two
+  pure decision points (resume-honored-on-match / ignored-on-mismatch / ignored-when-not-
+  requested, and clamp-vs-no-clamp persistence) plus `swift build`/a clean `swift run` launch —
+  **not yet live-verified** (actually switching playlists and confirming audible resume), deferred
+  to a future `/qc` pass per this project's established human-driven verification pattern for
+  GUI-observable behavior.
+  **BGM's own save/resume wiring** (`bgm-012`, 2026-08-11): `savePosition()` (above) turned out to
+  already be playlist-agnostic — it only ever read `currentPlaylist?.slug`/`hasLoadedCurrentTrack`,
+  both shared by BGM's synthetic playlist representation — so extending the periodic timer/on-
+  pause/on-switch-away saves to BGM was a one-line fix (dropping `savePosition()`'s `!isBGMActive`
+  guard) rather than a second near-duplicate save path. `playBGM(startingFrom:generation:
+  appendToHistory:resumePosition:)` gained the `resumePosition` parameter, mirroring
+  `play(startingAt:generation:resumePosition:)` exactly (same stale-position video-id guard, same
+  near-end-clamp persistence prediction) — passed `true` from both of `switchToBGM()`'s call sites
+  and `togglePlayPause()`'s post-restore BGM fallback; `advanceBGM`/`previousBGM`/
+  `selectBGMHistoryEntry` keep the default `false`. Does not touch BGM's dropped per-track loudness
+  normalization. See `BGMListenTracker.swift`'s entry above for `bgm-013`, implemented alongside
+  this (per this issue's own Notes) to fix the listen-count-threshold interaction resuming
+  introduces.
 - `Sources/PlaylistBar/Playlists.swift` — `Playlist` model and `FixedPlaylists.all`, the app's 4
   fixed playlists (slug/name/URL) transcribed from SPEC.md.
 - `Sources/PlaylistBar/PlaylistLoader.swift` — `PlaylistLoader`, cache-first playlist loading:
@@ -288,16 +326,29 @@ observable). Same PATH-hardening as `yt-dlp` above — see `FfmpegAvailability.s
   existing convention of isolating selection logic (see `TrackAvailabilityResolver`) as directly
   testable pure functions.
 - `Sources/PlaylistBar/BGMListenTracker.swift` — `BGMListenTracker` (`bgm-005`, 2026-08-10):
-  `start(videoID:duration:currentTime:)` arms a 1Hz `Timer` (same pattern as `AudioPlayer`'s own
-  end-of-track watchdog — `Timer` + `RunLoop.main.add(_:forMode:)` + a `Task { @MainActor in }`
-  hop, since a `Timer` callback isn't itself actor-isolated) that, once `currentTime()` crosses
-  `min(30, duration * 0.2)`, calls `BGMCacheStore.incrementListenCount(forVideoID:)` exactly once
-  and stops. `cancel()` stops without incrementing; `start()` always cancels any prior in-flight
-  tracking first. **Wiring requirement for whatever calls this** (`bgm-006`): switching away from
-  BGM to a fixed playlist must explicitly call `cancel()` — `start()`'s auto-cancel only covers
-  switching *between* BGM videos, so a still-armed tracker left running after leaving BGM would
-  keep polling `AudioPlayer.currentTime` against whatever's now loaded and could misattribute a
-  listen to a video that's no longer playing.
+  `start(videoID:duration:startPosition:currentTime:)` arms a 1Hz `Timer` (same pattern as
+  `AudioPlayer`'s own end-of-track watchdog — `Timer` + `RunLoop.main.add(_:forMode:)` + a
+  `Task { @MainActor in }` hop, since a `Timer` callback isn't itself actor-isolated) that, once
+  elapsed playback crosses `min(30, duration * 0.2)`, calls
+  `BGMCacheStore.incrementListenCount(forVideoID:)` exactly once and stops. `cancel()` stops
+  without incrementing; `start()` always cancels any prior in-flight tracking first. **Wiring
+  requirement for whatever calls this** (`bgm-006`): switching away from BGM to a fixed playlist
+  must explicitly call `cancel()` — `start()`'s auto-cancel only covers switching *between* BGM
+  videos, so a still-armed tracker left running after leaving BGM would keep polling
+  `AudioPlayer.currentTime` against whatever's now loaded and could misattribute a listen to a
+  video that's no longer playing. **`startPosition` parameter** (`bgm-013`, 2026-08-11, part of
+  the 2026-08-11 resume backlog — see SPEC.md): the threshold is now measured against `currentTime
+  () - startPosition` (elapsed *since this `start()` call*), not `currentTime()`'s absolute value
+  — otherwise a video resumed already past the absolute threshold (e.g. 25:00 of a 30:00 video,
+  `bgm-012`) would credit a listen almost instantly. Defaults to `0` (every from-the-beginning call
+  unaffected). **Deliberately not** captured by calling `currentTime()` inside `start()` itself, as
+  this issue's own originating Notes suggested — `PlaybackController.playBGM` calls `start()`
+  synchronously right after `player.load(...)`, but `AVPlayer.seek(to:)` (which `load` uses to
+  honor a resume `startTime`) is asynchronous, so `currentTime()` generally still reads stale/zero
+  at that exact point; found while implementing this issue, before it ever shipped. Fixed by having
+  the caller pass its already-known, already-clamp-adjusted effective start time in explicitly
+  instead of trying to read it back from player state that hasn't caught up yet — see the
+  `PlaybackController.swift` entry above.
 - `Sources/PlaylistBar/StreamResolver.swift` — `StreamResolver.resolve(videoID:preferProgressive:)`,
   resolves a playable stream URL via yt-dlp for one video, distinguishing genuinely unavailable
   videos (best-effort message matching) from other failures. Default (`preferProgressive: false`,
@@ -333,7 +384,17 @@ observable). Same PATH-hardening as `yt-dlp` above — see `FfmpegAvailability.s
   `player.seek(to: .zero)` + the existing `play()`, resetting `hasFiredFinishForCurrentItem` too —
   used by BGM's Reset, which restarts the *current* item rather than resolving a new one. Verified
   live against a real resolved stream: seeks genuinely back near 0 (not just continuing forward)
-  and resumes advancing afterward with `rate == 1.0`. `itemTracksObserver` (added 2026-08-10 as
+  and resumes advancing afterward with `rate == 1.0`. **`load`'s `startTime` parameter**
+  (`playback-engine-006`, 2026-08-11): `load(url:duration:startTime:autoplay:)` seeks the freshly-
+  replaced item to `startTime` right after `replaceCurrentItem`, same mechanism as `restart()`
+  above, just non-zero. Defaults to `nil` (unchanged 0:00-start behavior — every existing call site
+  is unaffected). Includes a near-end clamp: a `startTime` within 5s of the trusted `duration`
+  falls back to 0:00 instead of playing a couple seconds before the existing end-of-track watchdog
+  fires an almost-immediate auto-advance. Mechanics only — this issue doesn't decide *whether* a
+  saved position should be passed for a given track; that's `playback-controller-006` (fixed
+  playlists, done 2026-08-11 — see the `PlaybackController.swift` entry above, which is also why
+  `nearEndClampSeconds` is internal rather than `private`) and `bgm-012` (BGM), the latter not yet
+  implemented as of this note. `itemTracksObserver` (added 2026-08-10 as
   part of BGM's startup-latency fix, see below) is a KVO observation on the current item's
   `tracks` — populated asynchronously as the asset loads, same as `timeControlStatusObserver`'s
   pattern — that disables (`isEnabled = false`) any `.video` track once known. Needed because
@@ -416,6 +477,23 @@ observable). Same PATH-hardening as `yt-dlp` above — see `FfmpegAvailability.s
 - `Sources/PlaylistBar/PlayerState.swift` — `PlayerStateStore`, persists last-played-track per
   playlist, the last active playlist, and the app-wide `masterVolume` (default `1.0`, "no
   attenuation" — added for `volume-control-001`, 2026-08-09) as `player-state.json`.
+  **`lastPlayedPositionByPlaylist`** (`player-state-003`, 2026-08-11): one saved seek position
+  (seconds) per playlist slug, tied to whichever track is currently that slug's last-played one —
+  `lastPlayedPosition(forPlaylistSlug:)`/`setLastPlayedPosition(_:forPlaylistSlug:)`, mirroring
+  the existing track-id pair. Storage only — write cadence and applying the saved position on load
+  are `playback-controller-006` (fixed playlists, done 2026-08-11 — see the
+  `PlaybackController.swift` entry above)/`bgm-012` (BGM, not yet implemented as of this note).
+  **Real bug found and fixed while implementing this**: `State`'s synthesized `Decodable` didn't
+  actually apply a
+  property's `= default` for a missing key on any non-`Optional` field — only `Optional`
+  properties get that treatment automatically. This was already a latent gap for `masterVolume`
+  (any `player-state.json` from before volume-control-001 would fail to decode `State` at all,
+  and `load()`'s catch-all would silently reset *every* field, not just default the missing one),
+  confirmed via a standalone script. Fixed with a custom `init(from:)` using
+  `decodeIfPresent(...) ?? <default>` for every field in `State`, covering both the new field and
+  retroactively fixing `masterVolume`'s pre-existing gap — re-verified via a standalone script
+  covering round-trip, a "recent-old" file (has `masterVolume`, lacks the new field), a "very-old"
+  file (lacks `masterVolume` too), and a fully empty `{}`.
 - `Sources/PlaylistBar/YtDlpAvailability.swift` — `YtDlpLocator.checkAvailability()`, a PATH
   (+ Homebrew dirs) check for `yt-dlp`.
 - `Sources/PlaylistBar/YtDlpRunner.swift` — shared subprocess execution for yt-dlp: resolves its
@@ -478,9 +556,22 @@ needs a fresh full QC pass of its own.
   metadata instead of `AVFoundation`'s broken one — see `AudioPlayer.swift`/`StreamResolver.swift`
   above and playback-engine-005's "Fix" note. Verified both via a standalone script (145.0s vs the
   old 284.7s for a real previously-broken track) and live. App Nap prevention (added mid-
-  investigation) is real hardening worth keeping, but wasn't the actual cause either.
+  investigation) is real hardening worth keeping, but wasn't the actual cause either. Gained a new
+  issue, `playback-engine-006` (seek-to-a-start-position-on-load with a near-end clamp, part of
+  the 2026-08-11 per-track seek-position-resume backlog addition — see SPEC.md), done 2026-08-11 —
+  see the `AudioPlayer.swift` entry above. As of `playback-controller-006` (done 2026-08-11), the
+  4 fixed playlists' playlist-switch path now does pass a real `startTime` — this feature's
+  `qc-passed` status above still reflects behavior as it was last actually re-tested, and hasn't
+  been re-verified live against the new resume behavior yet (see the `PlaybackController.swift`
+  entry above for what's verified so far vs. still deferred to a future `/qc` pass).
 - **player-state, playback-controller, startup, system-integration**: still `ready-for-qc`, not
-  yet started.
+  yet started. `player-state` gained and completed a new issue, `player-state-003` (per-playlist
+  seek-position persistence, part of the 2026-08-11 resume backlog — see SPEC.md), done
+  2026-08-11 — see the `PlayerState.swift` entry above. `playback-controller` similarly gained and
+  completed `playback-controller-006` (persist/resume per-track seek position for the 4 fixed
+  playlists), done 2026-08-11 — see the `PlaybackController.swift` entry above; not yet
+  live-verified (deferred to a future `/qc` pass, same as `player-state-003`/`playback-engine-006`
+  above).
 - **volume-control**: `ready-for-qc` (2026-08-09), 8/8 done, never yet QC'd (new feature).
   Reframed 2026-08-09 (see SPEC.md's "Volume & loudness normalization"): two independent gain
   stages — a manual app-wide **master trim** (`001`/`002`) and automatic **per-track loudness
@@ -498,7 +589,7 @@ needs a fresh full QC pass of its own.
   banner (like `menu-bar-ui-005`'s yt-dlp one) or just silently degrade (every track plays
   unnormalized) was deliberately left an open question in `volume-control-003`'s Notes, not
   decided — currently it silently degrades, which may or may not be the right call.
-- **bgm**: `ready-for-qc` (2026-08-10), 11/11 done — added 2026-08-10 (see SPEC.md's "BGM channel
+- **bgm**: `ready-for-qc` (2026-08-10), 13/13 done — added 2026-08-10 (see SPEC.md's "BGM channel
   playback"), a
   5th playlist-picker entry that plays random 15+ minute, non-members-only videos from a pool of
   YouTube channels, weighted toward whichever's been listened to least locally. All 11 issues are
@@ -533,6 +624,15 @@ needs a fresh full QC pass of its own.
   `bgm-006`'s Notes list the remaining deliberate scope decisions worth knowing: no BGM-specific
   next-track preloader (a real, if usually brief, resolution gap on auto-advance, unlike the fixed
   playlists' gapless transition).
+
+  **Gained and completed 2 new issues, 2026-08-11** (part of the per-track seek-position-resume
+  backlog — see SPEC.md's "Local state (per playlist)"): `bgm-012` (persist/resume BGM's saved
+  seek position) and `bgm-013` (measure the listen-count threshold relative to resume, not
+  absolute position) — see the `PlaybackController.swift`/`BGMListenTracker.swift` entries above.
+  Neither has been live-verified yet (deferred to a future `/qc` pass, same as every other issue
+  in this backlog addition — see `playback-controller-006`'s entry above); a fresh full `/qc` pass
+  was already owed to this feature before these landed, so it now additionally needs to cover
+  BGM's resume behavior and the listen-count-threshold fix.
 
 Known gaps worth knowing about, not blockers:
 - **Visual/interactive UI verification turned out to be possible after all**, just not via

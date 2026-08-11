@@ -76,7 +76,14 @@ final class AudioPlayer: ObservableObject {
     /// signal (`isBuffering` above) to catch this either. Since yt-dlp already knows the real
     /// duration (it's the video's own metadata), this watchdog uses that instead of waiting on
     /// AVFoundation's broken one.
-    func load(url: URL, duration: Double?, autoplay: Bool = true) {
+    /// Extra time before `duration` within which a requested `startTime` is treated as "basically
+    /// the end" and clamped to 0:00 instead — otherwise a resume lands a few seconds before the
+    /// trusted-duration watchdog fires and triggers a near-instant auto-advance. Internal (not
+    /// `private`) so `PlaybackController` can predict the same clamp decision when deciding what
+    /// position to persist as "where this track actually started" — see playback-controller-006.
+    static let nearEndClampSeconds = 5.0
+
+    func load(url: URL, duration: Double?, startTime: Double? = nil, autoplay: Bool = true) {
         removeFinishObserver()
         knownEndWatchdog?.invalidate()
         itemTracksObserver?.invalidate()
@@ -85,6 +92,13 @@ final class AudioPlayer: ObservableObject {
 
         let item = AVPlayerItem(url: url)
         player.replaceCurrentItem(with: item)
+
+        if let startTime, startTime > 0 {
+            let isNearEnd = duration.map { startTime >= $0 - Self.nearEndClampSeconds } ?? false
+            if !isNearEnd {
+                player.seek(to: CMTime(seconds: startTime, preferredTimescale: 600))
+            }
+        }
 
         // `item.tracks` populates asynchronously as the asset loads. A no-op for audio-only items
         // (the 4 fixed playlists) since none of their tracks are ever `.video`.

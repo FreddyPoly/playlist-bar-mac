@@ -5,10 +5,38 @@ import Foundation
 enum PlayerStateStore {
     private struct State: Codable {
         var lastPlayedTrackByPlaylist: [String: String] = [:]
+        /// Elapsed seek position (seconds) within the last-played track for a playlist slug — one
+        /// value per slot, tied to whichever track `lastPlayedTrackByPlaylist` currently records
+        /// for that slug (not a history of positions per track).
+        var lastPlayedPositionByPlaylist: [String: Double] = [:]
         var lastActivePlaylistSlug: String?
         /// App-wide master volume trim (0.0–1.0), independent of per-playlist state. Defaults to
         /// 1.0 ("no attenuation") for a newly-installed app with no prior persisted state.
         var masterVolume: Double = 1.0
+
+        init() {}
+
+        /// Custom decoding: a property's `= default` initializer is NOT applied by Swift's
+        /// synthesized `Decodable` for a missing key on a non-Optional type (only `Optional`
+        /// properties get that treatment, via an implicit `decodeIfPresent`) — confirmed via a
+        /// standalone script while adding `lastPlayedPositionByPlaylist` below (added 2026-08-11
+        /// for player-state-003). Without this, decoding a `player-state.json` written before
+        /// *any* non-Optional field here existed (e.g. before `masterVolume`, volume-control-001)
+        /// throws and `load()`'s catch-all falls back to a fully-empty `State()` — silently
+        /// discarding the last-played-track/last-active-playlist data too, not just defaulting
+        /// the new field. Decoding every field via `decodeIfPresent ?? <default>` makes adding a
+        /// field here backward-compatible going forward, and fixes that latent gap retroactively
+        /// for existing installs.
+        init(from decoder: Decoder) throws {
+            let container = try decoder.container(keyedBy: CodingKeys.self)
+            lastPlayedTrackByPlaylist = try container.decodeIfPresent(
+                [String: String].self, forKey: .lastPlayedTrackByPlaylist) ?? [:]
+            lastPlayedPositionByPlaylist = try container.decodeIfPresent(
+                [String: Double].self, forKey: .lastPlayedPositionByPlaylist) ?? [:]
+            lastActivePlaylistSlug = try container.decodeIfPresent(
+                String.self, forKey: .lastActivePlaylistSlug)
+            masterVolume = try container.decodeIfPresent(Double.self, forKey: .masterVolume) ?? 1.0
+        }
     }
 
     private static var fileURL: URL {
@@ -46,6 +74,21 @@ enum PlayerStateStore {
     static func setLastPlayedTrack(_ videoID: String, forPlaylistSlug slug: String) {
         var state = load()
         state.lastPlayedTrackByPlaylist[slug] = videoID
+        save(state)
+    }
+
+    /// The last-played track's saved seek position (seconds) for a playlist, or `nil` if never
+    /// saved (callers should treat this as "start from 0:00").
+    static func lastPlayedPosition(forPlaylistSlug slug: String) -> Double? {
+        load().lastPlayedPositionByPlaylist[slug]
+    }
+
+    /// Records `position` as the last-played track's seek position for `slug`. It's the caller's
+    /// responsibility to only save a position that corresponds to the track currently recorded by
+    /// `setLastPlayedTrack` for this slug, so the two stay consistent.
+    static func setLastPlayedPosition(_ position: Double, forPlaylistSlug slug: String) {
+        var state = load()
+        state.lastPlayedPositionByPlaylist[slug] = position
         save(state)
     }
 

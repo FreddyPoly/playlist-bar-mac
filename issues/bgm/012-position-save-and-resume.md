@@ -1,7 +1,7 @@
 ---
 id: bgm-012
 title: Persist and resume BGM's saved seek position
-status: open
+status: done
 security: false
 owner: agent
 depends_on: [player-state-003, playback-engine-006, bgm-006, bgm-009]
@@ -43,3 +43,44 @@ which must land alongside this issue so resuming late into a long video doesn't 
 listen just because the resumed position already happens to be past the threshold.
 
 No flush-on-quit hook, same explicit decision as `playback-controller-006`.
+
+## Fix / Implementation notes (2026-08-11)
+
+`PlaybackController.savePosition()` (added by `playback-controller-006`) turned out to already be
+playlist-agnostic — it only ever read `currentPlaylist?.slug`/`hasLoadedCurrentTrack`, both shared
+by BGM's synthetic playlist representation — so the one-line fix was removing its `!isBGMActive`
+guard rather than writing a second, near-duplicate BGM-specific save function. This alone gives
+BGM the periodic 5s save (same timer) and the on-pause save (`togglePlayPause()`'s pause branch
+already called `savePosition()` unconditionally) for free. The on-switch-away save was likewise
+already covered: `switchTo(playlist:)` (switching away *from* BGM) and `switchToBGM()` (switching
+away from a fixed playlist *to* BGM) both already call `savePosition()` as their first line.
+
+`playBGM(startingFrom:generation:appendToHistory:resumePosition:)` gained the `resumePosition`
+parameter (default `false`, mirroring `play(startingAt:generation:resumePosition:)`), passed
+`true` from both of `switchToBGM()`'s call sites and from `togglePlayPause()`'s post-restore BGM
+fallback — `advanceBGM`/`previousBGM`/`selectBGMHistoryEntry` all keep the default, so Next/
+Previous/history-click still start at 0:00. When honored, resume is only actually applied if
+`PlayerStateStore.lastPlayedTrack(forPlaylistSlug: "bgm")` still matches the video actually played
+— same stale-position guard as the fixed-playlist path, needed here too since `playBGM`'s own
+retry-on-unavailable loop can swap `candidate` mid-call. The same near-end-clamp persistence
+prediction as `playback-controller-006` was added (using the same now-internal
+`AudioPlayer.nearEndClampSeconds`) so a clamped resume persists 0, not the pre-clamp `startTime`.
+
+Verified `startTrack`'s two paths in `switchToBGM()`: passing `resumePosition: true` unconditionally
+from both is safe even though one is "found in `bgmHistory`" and the other is "fresh pick, first
+switch this session" — in both cases `startTrack` is *either* the actual persisted last-played
+video (in which case resuming is correct) *or* a freshly-`BGMSelector`-picked video (in which case
+the internal video-id-match guard naturally no-ops, since a fresh pick's id won't equal the saved
+one). Confirmed by re-reading `switchToBGM()`'s existing logic rather than by a live run.
+
+Deliberately did **not** touch `BGMListenTracker`'s threshold logic or its `bgmListenTracker.start(
+...)` call site here — `bgm-013` (implemented immediately after this issue, per this issue's own
+Notes above requiring them to land together) owns making the threshold relative to the resume
+offset rather than absolute position.
+
+Verified: `swift build` passes; the same standalone script from `playback-engine-006`/
+`playback-controller-006` covers the shared decision formulas (video-id resume guard, near-end-
+clamp persistence prediction) since BGM's `playBGM` uses byte-for-byte the same logic; `swift run`
+launches cleanly. **Not live-verified** for the same reason as `playback-controller-006` — deferred
+to a future `/qc` pass. `/code-review` unavailable (same documented limitation); did a manual
+self-review pass instead.

@@ -1,7 +1,7 @@
 ---
 id: playback-engine-006
 title: Seek to a start position on load, with near-end clamp
-status: open
+status: done
 security: false
 owner: agent
 depends_on: [playback-engine-002, playback-engine-005]
@@ -38,3 +38,16 @@ Callers (`playback-controller-006`, `bgm-012`) are responsible for deciding *whe
 position applies to the track being loaded (e.g. a fresh, never-before-played track has no saved
 position and should pass `nil`) — this issue only covers the mechanics of seeking once a start
 time is given.
+
+## Fix / Implementation notes (2026-08-11)
+
+`load(url:duration:startTime:autoplay:)` gained the `startTime` parameter (default `nil`, so
+every existing caller is unaffected — verified via `swift build`, all three current call sites in
+`PlaybackController.swift` compile unchanged). The seek is issued right after
+`replaceCurrentItem`, same pattern already used by `restart()`. Near-end clamp threshold is
+`duration - 5s`; verified via a standalone script covering: mid-track resume, at/just-inside/
+just-outside the clamp boundary, `nil`/`0` startTime (no-op, matches pre-existing behavior), and
+no-known-duration (never clamped, honored literally). `/code-review` couldn't be run (agent-
+invocable only via explicit user run, no GitHub remote for `/review` either, per this repo's
+existing documented limitation) — did a manual self-review pass instead, same convention as every
+other issue in this codebase pre-git.
