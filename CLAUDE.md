@@ -61,19 +61,31 @@ observable). Same PATH-hardening as `yt-dlp` above — see `FfmpegAvailability.s
 ## Layout
 
 - `Sources/PlaylistBar/PlaylistBarApp.swift` — app entry point. `MenuBarExtra` with a dynamic
-  label (icon + current track title, truncated) and `ContentView` as the dropdown content. Owns
-  the single `PlaybackController` instance (shared between label and dropdown) and kicks off
+  label (icon-only, see below) and `ContentView` as the dropdown content. Owns the single
+  `PlaybackController` instance (shared between label and dropdown) and kicks off
   `restoreLastSession()` from the label's `.task` (the label, unlike the dropdown content, is
   instantiated immediately at launch — needed so the previous session is restored before the
-  dropdown is ever opened). `AppDelegate` sets `.accessory` activation policy (no Dock icon). The
-  label is built as an explicit `HStack { Image(systemName:); Text(menuBarTitle) }`, not
+  dropdown is ever opened). `AppDelegate` sets `.accessory` activation policy (no Dock icon).
+  **Icon-only label** (changed 2026-08-12, via `/interview` — see SPEC.md's "UI (menu bar
+  dropdown)" for the full writeup): the label originally paired an icon with the current track
+  title as an explicit `HStack { Image(systemName:); Text(menuBarTitle) }` (not
   `Label(_:systemImage:)` — a `MenuBarExtra` status item doesn't reliably render `Label`'s title
-  text next to its icon (collapses to icon-only); found via QC on 2026-08-09, see menu-bar-ui-004.
-  `menuBarTitle`'s truncation length was halved from 40 to 20 characters (2026-08-11, user report:
-  the untruncated title was long enough to sometimes cover the system menu bar's battery icon) —
-  confirmed via `/interview` that the more aggressive truncation this causes (e.g. "Never Gonna
-  Give You Up" becoming "Never Gonna Give You…") is an acceptable tradeoff against covering system
-  status icons.
+  text next to its icon, collapses to icon-only; found via QC on 2026-08-09, see
+  menu-bar-ui-004), with `menuBarTitle`'s truncation length halved from 40 to 20 characters on
+  2026-08-11 after a user report that the untruncated title could cover the system menu bar's
+  battery icon. That whole title-text label was then dropped entirely on 2026-08-12: the user
+  found PlaylistBar's icon getting hidden by ordinary macOS menu-bar-overflow (too many status
+  items for the available width — confirmed via `ps` the app process was still running, not
+  crashed), and a variable-width text label was judged the likely reason this item specifically
+  kept losing that contest. The label is now just `Image(systemName:)`, with the glyph swapping
+  between `"music.note"` (playing) and `"pause.circle"` (paused) — `controller.isPlaying` — as a
+  zero-width way to keep some status visible without opening the dropdown. A `.help()` hover
+  tooltip carrying the track title was tried as a way to preserve some of the lost glance info,
+  but confirmed live (twice) not to render at all on `MenuBarExtra` status items — same root cause
+  as the `Label`-text-collapse quirk above (the label is hosted specially by AppKit and doesn't
+  wire up SwiftUI's tooltip mechanism). Fixing that would mean replacing `MenuBarExtra` with a
+  hand-rolled `NSStatusItem`; judged not worth it for a tooltip, so it was reverted rather than
+  pursued — the track title is dropdown-only now.
 - `Sources/PlaylistBar/ContentView.swift` — the dropdown: yt-dlp-missing / error messaging,
   playlist `Picker`, transport buttons (Previous/Play-Pause/Next/Reset), the previous-5/current/
   next-5 track list (click any row to jump to it), a Launch-at-Login `Toggle`, and Quit. All
@@ -530,7 +542,8 @@ still recommended (not yet run) before considering this release-ready.
   stale-cache (>24h) background refresh actually replacing the on-disk cache, cache integrity
   surviving a failed background refresh, and safe plain-text rendering of CJK/ampersand track
   titles. The mid-pass block from the earlier menu-bar-ui display bugs is resolved.
-- **menu-bar-ui**: `qc-passed` (2026-08-09), 6/6 done. History: an earlier pass found and fixed
+- **menu-bar-ui**: `qc-passed` (originally 2026-08-09; re-confirmed with a fresh full pass
+  2026-08-12 after the icon-only change below), 6/6 done. History: an earlier pass found and fixed
   two rendering bugs (menu-bar-ui-003/004, see
   their "Fix (2026-08-09)" notes) and passed all 7 scenarios including a live yt-dlp-absent/
   relaunch test. A follow-up scenario during playlist-data QC — disabling yt-dlp *mid-session*
@@ -541,6 +554,22 @@ still recommended (not yet run) before considering this release-ready.
   gained and completed a new issue, `menu-bar-ui-006` (loading/buffering visual feedback across
   playlist-switch/fresh-resolve/stall wait moments, consuming `playback-engine-005`'s `isBuffering`
   signal) — see the `ContentView.swift` entry above; verified live.
+  **Post-QC change, 2026-08-12** (via `/interview`, not a reopened issue): the menu bar label
+  dropped its track-title text entirely in favor of icon-only + a playing/paused glyph swap, to
+  fix the user's real menu-bar-overflow problem (icon getting hidden, no track-title text/
+  tooltip visible in it anymore as a deliberate trade-off) — see the `PlaylistBarApp.swift` entry
+  above for the full writeup, including the `.help()` tooltip attempt that was tried and reverted
+  after confirming live it doesn't render on `MenuBarExtra` status items. Live-verified twice by
+  the user against the real packaged `.app` (once with the tooltip attempt, once after reverting
+  it) — icon-only label and the playing/paused glyph swap both confirmed correct on screen.
+  **`/qc` pass, 2026-08-12**: all 5 in-scope scenarios passed live — icon-only label, the
+  playing/paused glyph swap, the playlist selector (all 4 fixed playlists + BGM, switching
+  works), transport controls (Previous/Next/Reset/Play-Pause), and the track list
+  (previous-5/current/next-5, current highlighted, click-to-play). `menu-bar-ui-005`
+  (yt-dlp-missing messaging) and `menu-bar-ui-006` (loading/buffering spinner) were **not**
+  re-run this pass — by design, nothing in today's change touched either path, mirroring
+  `playback-engine`'s 2026-08-11 precedent of skipping an unchanged scenario rather than
+  re-confirming it for its own sake.
 - **playback-engine**: `qc-passed` (originally 2026-08-09; re-confirmed with a fresh full pass
   2026-08-11 after `playback-engine-006` landed). 2026-08-09 pass covered: basic playback,
   natural-end auto-advance, gapless preload, rapid manual Previous/Next/track-click navigation.

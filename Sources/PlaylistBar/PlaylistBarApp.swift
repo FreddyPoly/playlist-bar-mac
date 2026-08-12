@@ -16,28 +16,22 @@ struct PlaylistBarApp: App {
             // which is what makes this the right place to restore the previous session —
             // ContentView's own `.task` only runs once the dropdown is actually opened.
             //
-            // Deliberately an HStack of Image+Text rather than `Label(_:systemImage:)`: a
-            // MenuBarExtra status item doesn't reliably render Label's title text next to its
-            // icon (it collapses to icon-only), even though the icon itself shows fine.
-            HStack {
-                Image(systemName: "music.note")
-                Text(menuBarTitle)
-            }
-            .task {
-                await controller.restoreLastSession()
-            }
+            // Icon-only, no text (changed 2026-08-12, see SPEC.md's "UI (menu bar dropdown)"):
+            // a variable-width text label was the likely reason this item, specifically, kept
+            // getting squeezed out of a crowded menu bar. The glyph itself swaps for play/pause
+            // state as a zero-width way to keep some status visible; the track title itself is
+            // dropdown-only now — a `.help()` tooltip was tried but doesn't actually render on
+            // MenuBarExtra status items (the label is hosted specially by AppKit and doesn't wire
+            // up SwiftUI's tooltip mechanism; same root cause as the existing Label-text-collapse
+            // note below). Fixing that would mean replacing MenuBarExtra with a hand-rolled
+            // NSStatusItem — not worth it for a hover tooltip; user decision via `/interview`,
+            // 2026-08-12.
+            Image(systemName: controller.isPlaying ? "music.note" : "pause.circle")
+                .task {
+                    await controller.restoreLastSession()
+                }
         }
         .menuBarExtraStyle(.window)
-    }
-
-    private var menuBarTitle: String {
-        guard let index = controller.currentIndex, controller.tracks.indices.contains(index) else {
-            return "Playlist Bar"
-        }
-        let title = controller.tracks[index].title
-        let maxLength = 20
-        guard title.count > maxLength else { return title }
-        return String(title.prefix(maxLength)) + "…"
     }
 }
 

@@ -238,7 +238,23 @@ Stored locally (JSON, in the same Application Support directory), no database, n
 
 ## UI (menu bar dropdown)
 
-- Menu bar item shows a small icon **plus the current track title** (truncated as needed).
+- Menu bar item shows **icon-only** (no track-title text) — changed 2026-08-12, decided via
+  `/interview` after the user found the icon getting hidden by macOS menu bar overflow (too many
+  status items for the available width; confirmed via `ps` that the app itself was still running,
+  not crashed). A variable-width text label was judged the likely reason PlaylistBar's own item
+  was the one getting squeezed out, so it was dropped in favor of a minimal, fixed-width icon.
+  Trade-off accepted: no more always-visible "what's playing" text — the track title is
+  dropdown-only now. The icon glyph itself swaps between playing/paused state (e.g. a filled vs.
+  outline/paused variant), so at least play/pause status is visible without opening the dropdown.
+  A hover tooltip (SwiftUI `.help()`) with the track title was tried as a zero-width way to keep
+  some of that glance info, but **doesn't actually work**: `.help()` doesn't render on
+  `MenuBarExtra` status items (same underlying AppKit-hosting quirk as the pre-existing
+  Label-text-collapse issue — see `PlaylistBarApp.swift`). Fixing that would require replacing
+  `MenuBarExtra` with a hand-rolled `NSStatusItem`; judged not worth it for a tooltip (user
+  decision via `/interview`, 2026-08-12) — dropped instead of pursued.
+  Immediate workaround for when the icon is hidden entirely: macOS Control Center's Now Playing
+  widget already works via this app's existing `MPNowPlayingInfoCenter`/media-key integration
+  (play/pause/skip), independent of whether PlaylistBar's own menu bar icon is visible.
 - Dropdown contains:
   - Playlist selector (dropdown of the 4 fixed playlists plus **BGM**, by name).
   - Transport controls: **Previous / Play-Pause / Next / Reset** — same buttons for BGM, but see

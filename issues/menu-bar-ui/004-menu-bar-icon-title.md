@@ -10,14 +10,17 @@ spec_ref: "SPEC.md#ui-menu-bar-dropdown"
 
 ## Description
 
-Menu bar item shows a small icon plus the current track's title (truncated as needed) next to
-it, updating as the track changes.
+**Superseded 2026-08-12 (see below): menu bar item is now icon-only.** Originally: menu bar item
+shows a small icon plus the current track's title (truncated as needed) next to it, updating as
+the track changes.
 
 ## Acceptance criteria
 
-- Menu bar text reflects the currently playing/selected track title.
-- Long titles are truncated (e.g. with an ellipsis) rather than breaking the menu bar layout.
-- An icon is shown alongside the title text.
+- ~~Menu bar text reflects the currently playing/selected track title.~~ Superseded — no text in
+  the menu bar item anymore, see "Icon-only change" below. Track title is dropdown-only now.
+- ~~Long titles are truncated (e.g. with an ellipsis) rather than breaking the menu bar layout.~~
+  Moot — no text to truncate.
+- An icon is shown, reflecting playing/paused state (`music.note` / `pause.circle`).
 
 ## Notes
 
@@ -93,3 +96,21 @@ cause as originally suspected.
 
 Truncation and icon-presence acceptance criteria were unaffected by this change (same
 `menuBarTitle` computation, same SF Symbol) and were already verified in the original pass.
+
+## Icon-only change (2026-08-12)
+
+Superseded most of the above via `/interview`: the user reported the menu bar icon getting hidden
+by ordinary macOS menu-bar overflow (too many status items for the available width — confirmed via
+`ps` that the app process itself was still running, not crashed) and losing all access to
+playlist/volume/track controls as a result. A variable-width text label was judged the likely
+reason PlaylistBar's own item specifically kept losing that contest, so it was dropped: the label
+is now `Image(systemName:)` only, no `Text`, with the glyph swapping between `"music.note"`
+(playing) and `"pause.circle"` (paused) off `controller.isPlaying` — see the
+`PlaylistBarApp.swift` entry in CLAUDE.md and SPEC.md's "UI (menu bar dropdown)" for the full
+writeup, including a `.help()` hover-tooltip attempt that was tried (to keep some track-title
+glanceability) and reverted after confirming live it doesn't render on `MenuBarExtra` status items.
+
+Live-verified twice by the user against the real packaged app during implementation (icon-only
+label and the playing/paused glyph swap both confirmed correct on screen) — not yet run through a
+full scenario-based `/qc` pass at the feature level; that's still owed, per this project's own
+established convention that a fix/change doesn't auto-promote QC status.
