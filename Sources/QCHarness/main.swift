@@ -59,8 +59,19 @@ try? FileManager.default.createDirectory(atPath: options.screenshotDir, withInte
 
 FileHandle.standardError.write("Waiting up to \(Int(options.waitTimeout))s for \(options.bundleIdentifier) to be ready...\n".data(using: .utf8)!)
 
+// Constructing `PopoverController` only confirms the process is registered with
+// `NSRunningApplication` — which happens as soon as `open` returns, well before SwiftUI has
+// actually finished setting up `MenuBarExtra`'s status item. Waiting on construction alone made
+// this "ready" check pass almost instantly, long before `AXExtrasMenuBar` genuinely existed, so
+// every scenario failed identically at 0.0s. Found live during this harness's first real
+// end-to-end run (2026-08-13) — fixed by folding the status-item check into the same readiness
+// wait, so "ready" means "the status item is actually queryable," not just "the process exists."
 let controller: PopoverController? = waitUntil(timeout: options.waitTimeout, interval: 0.3) {
-    try? PopoverController(bundleIdentifier: options.bundleIdentifier)
+    guard let controller = try? PopoverController(bundleIdentifier: options.bundleIdentifier) else {
+        return nil
+    }
+    guard (try? controller.statusItemLabel()) != nil else { return nil }
+    return controller
 }
 
 guard let controller else {

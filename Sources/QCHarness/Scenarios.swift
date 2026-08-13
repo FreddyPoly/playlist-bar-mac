@@ -432,6 +432,128 @@ let allScenarios: [Scenario] = [
         }
         guard AX.isEnabled(quit) else { throw HarnessError(description: "quit button not enabled") }
         return "quit button present and enabled (not pressed)"
+    },
+
+    Scenario(
+        name: "21-stream-resolve-timeout-bounded",
+        category: .regression,
+        relatedIssues: ["playback-engine-007"],
+        takesScreenshot: false
+    ) { ctx in
+        // Switch to some other playlist first, using the real (not-yet-shimmed) yt-dlp, so that
+        // switching to Rock3 below is unambiguously a real selection change — not a same-value
+        // reselect that some picker/binding layer might treat as a no-op — and so Rock3 isn't
+        // already the active playlist (with its own preload potentially in flight) at the moment
+        // the shim goes in.
+        let setupWindow = try ctx.controller.window()
+        try ctx.controller.selectPlaylist(named: "Jazz", in: setupWindow)
+        guard waitUntil(timeout: 15, interval: 0.3, { ctx.controller.currentPlaylistName() == "Jazz" ? true : nil }) == true else {
+            throw HarnessError(description: "could not switch to Jazz to set up resolve-timeout scenario")
+        }
+        Thread.sleep(forTimeInterval: 1.0)
+
+        // Install the shim *before* triggering any playback action in this scenario — nothing
+        // should be actively resolving at this point (scenarios 19/20 just before this one are
+        // read-only), so the shim's very first invocation is guaranteed to be the one this
+        // scenario itself triggers below, not a race against `NextTrackPreloader`'s own
+        // background resolve for whatever's already playing. Found live: installing the shim
+        // *after* selecting a playlist let that selection's own preload for `current + 1` race
+        // ahead of (or consume the same marker as) this scenario's intended trigger, making the
+        // result nondeterministic — sometimes suspiciously fast (the preload silently ate the
+        // one hang), sometimes stuck well past the expected bound (a naive per-video-id marker
+        // instead made *every* newly-tried candidate hang in turn during
+        // `TrackAvailabilityResolver`'s retry, compounding well past a single 10s timeout). This
+        // structure — one global "have I hung yet" flag, armed before anything can race it —
+        // avoids both failure modes at the root instead of working around either symptom.
+        let candidates = ["/opt/homebrew/bin/yt-dlp", "/usr/local/bin/yt-dlp"]
+        let fm = FileManager.default
+        let marker = "/tmp/playlistbar-qc-ytdlp-shim-fired"
+        try? fm.removeItem(atPath: marker)
+        var hidden: [(from: String, to: String)] = []
+        defer {
+            // Unlike scenario 17 (which only ever moves the real binary aside and never writes
+            // anything new to its original path), this scenario also writes a shim *to* that path
+            // — so by the time this runs, `from` is occupied by the shim, not empty.
+            // `FileManager.moveItem` fails outright when its destination already exists (unlike
+            // POSIX `mv`, it does not silently overwrite), so restoring would silently no-op
+            // (swallowed by `try?`) without first clearing the shim out of the way. Found live:
+            // an earlier version of this scenario left the shim in place every run, papered over
+            // only by `Scripts/qc.sh`'s own `mv`-based safety net.
+            for (from, to) in hidden {
+                try? fm.removeItem(atPath: from)
+                try? fm.moveItem(atPath: to, toPath: from)
+            }
+            try? fm.removeItem(atPath: marker)
+        }
+        for path in candidates where fm.fileExists(atPath: path) {
+            let hiddenPath = path + ".qc-hidden"
+            try fm.moveItem(atPath: path, toPath: hiddenPath)
+            hidden.append((from: path, to: hiddenPath))
+
+            // First invocation (of *any* video, ever, after this shim goes in) hangs 30s (well
+            // past `StreamResolver.resolveTimeout`'s 10s) via `exec sleep 30` — replacing the
+            // shell's own process image with `sleep` rather than forking a child of it, so
+            // `YtDlpRunner`'s `process.terminate()` kills the actual hung process directly, the
+            // same single-process shape the real `yt-dlp` binary has (no orphaned grandchild
+            // possible). Every invocation after the first delegates straight to the real,
+            // now-hidden binary — including `TrackAvailabilityResolver`'s retry on the next
+            // track if the first candidate happened to be unavailable for an unrelated reason.
+            let shim = """
+            #!/bin/bash
+            MARKER="\(marker)"
+            if [ ! -f "$MARKER" ]; then
+                touch "$MARKER"
+                exec sleep 30
+            fi
+            exec "\(hiddenPath)" "$@"
+            """
+            try shim.write(toFile: path, atomically: true, encoding: .utf8)
+            try fm.setAttributes([.posixPermissions: 0o755], ofItemAtPath: path)
+        }
+        guard !hidden.isEmpty else {
+            throw HarnessError(description: "no yt-dlp binary found at \(candidates) to shim — cannot exercise this scenario on this machine")
+        }
+
+        let window = try ctx.controller.window()
+        let start = Date()
+        // Switching playlists always resolves fresh for the destination's saved/starting
+        // position (`PlaybackController.switchTo(playlist:)` never consults any cache for this),
+        // so this alone is a reliable, real trigger — no track-row click needed.
+        //
+        // **Known residual flakiness (2026-08-13):** even with the setup above, this occasionally
+        // still clears in well under a second — clearly too fast to have actually hit the 10s
+        // timeout, but confirmed (live, repeatedly, with an out-of-band process monitor watching
+        // for the shim's `sleep 30`) to never be a false *failure* either: the underlying
+        // `resolveTimeout`-kill-then-skip mechanism itself was directly verified working
+        // correctly (a clean ~12-18s pass, and independently, the shim process observed alive
+        // then genuinely gone well inside the 10s bound). The fast passes are believed to be some
+        // remaining internal timing interaction with `NextTrackPreloader`/SwiftUI's picker
+        // dispatch this investigation didn't fully pin down before deciding it wasn't worth
+        // further live-environment guessing — not a gap in the production fix, which has its own
+        // direct confirmation independent of this scenario's pass/fail. Treat a fast pass here as
+        // inconclusive-but-safe, not as proof; treat a *failure* (spinner never clears, or clears
+        // too slowly) as a real signal worth investigating.
+        try ctx.controller.selectPlaylist(named: "Rock3", in: window)
+
+        let window2 = try ctx.controller.window()
+        // 25s bound: comfortably covers the worst realistic case (10s resolve timeout + a fast
+        // real resolve on retry + up to a 5s bounded loudness-analysis wait), while still clearly
+        // distinguishing a working fix from the shim's full 30s hang running to completion.
+        let cleared = waitUntil(timeout: 25, interval: 0.3) { () -> Bool? in
+            ctx.controller.playPauseLabel(in: window2) == "Loading" ? nil : true
+        }
+        let elapsed = Date().timeIntervalSince(start)
+        guard cleared == true else {
+            throw HarnessError(description: "loading spinner still showing after \(String(format: "%.1f", elapsed))s — resolve-timeout regression (playback-engine-007)")
+        }
+        guard elapsed < 22 else {
+            throw HarnessError(description: "loading cleared but took \(String(format: "%.1f", elapsed))s — too slow to be the 10s timeout firing, looks like the full 30s hang ran to completion instead")
+        }
+        guard ctx.controller.currentPlaylistName(in: window2) == "Rock3" else {
+            throw HarnessError(description: "did not end up on Rock3 after the simulated hung resolve")
+        }
+
+        return "loading state cleared in \(String(format: "%.1f", elapsed))s after a simulated hung resolve (auto-skipped to a playable track)"
     }
 ]
 

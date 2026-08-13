@@ -14,6 +14,7 @@
 | playback-engine-004 | Unavailable-track auto-skip | done | false | agent | playback-engine-001, playback-engine-003 |
 | playback-engine-005 | Feedback/resilience for throttled stream delivery | done | false | agent | playback-engine-001, playback-engine-002 |
 | playback-engine-006 | Seek to a start position on load, with near-end clamp | done | false | agent | playback-engine-002, playback-engine-005 |
+| playback-engine-007 | Bounded timeouts for stream resolution and playback buffering | done | false | agent | playback-engine-001, playback-engine-002, playback-engine-004 |
 | player-state-001 | Per-playlist last-played-track persistence | done | false | agent | |
 | player-state-002 | Last active playlist persistence | done | false | agent | player-state-001 |
 | player-state-003 | Per-playlist last-played seek-position persistence | done | false | agent | player-state-001 |

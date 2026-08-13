@@ -12,7 +12,15 @@ final class AudioPlayer: ObservableObject {
     /// what `automaticallyWaitsToMinimizeStalling` is for), so relaying its own signal avoids
     /// reinventing stall detection and its false-positive/jitter pitfalls.
     @Published private(set) var isBuffering = false {
-        didSet { onBufferingChange?(isBuffering) }
+        didSet {
+            onBufferingChange?(isBuffering)
+            if isBuffering {
+                if bufferingWatchdog == nil { armBufferingWatchdog() }
+            } else {
+                bufferingWatchdog?.invalidate()
+                bufferingWatchdog = nil
+            }
+        }
     }
 
     private let player = AVPlayer()
@@ -34,6 +42,16 @@ final class AudioPlayer: ObservableObject {
 
     private var knownEndWatchdog: Timer?
     private var hasFiredFinishForCurrentItem = false
+
+    /// Fires once `isBuffering` has been continuously true for `bufferingTimeoutSeconds` —
+    /// `AVPlayer` stuck in `.waitingToPlayAtSpecifiedRate` after a stream URL already resolved
+    /// successfully is a different failure point than resolution itself (see `StreamResolver`'s
+    /// own timeout), but leads to the same permanent-spinner symptom if nothing bounds it. Armed
+    /// in `isBuffering`'s `didSet` and disarmed the moment buffering stops, so only *continuous*
+    /// stalling counts, not the sum of several short ones. See SPEC.md's "Resolution and
+    /// buffering timeouts".
+    private var bufferingWatchdog: Timer?
+    private static let bufferingTimeoutSeconds: TimeInterval = 20.0
 
     /// Attenuates this app's own audio output (0.0–1.0), independent of system/macOS volume —
     /// this is `AVPlayer`'s own `volume` property, which applies immediately to whatever's
@@ -87,7 +105,7 @@ final class AudioPlayer: ObservableObject {
         removeFinishObserver()
         knownEndWatchdog?.invalidate()
         itemTracksObserver?.invalidate()
-        isBuffering = false
+        isBuffering = false // `didSet` also disarms `bufferingWatchdog`.
         hasFiredFinishForCurrentItem = false
 
         let item = AVPlayerItem(url: url)
@@ -192,6 +210,27 @@ final class AudioPlayer: ObservableObject {
         onBufferingChange = handler
     }
 
+    private func armBufferingWatchdog() {
+        let timer = Timer(timeInterval: Self.bufferingTimeoutSeconds, repeats: false) { [weak self] _ in
+            Task { @MainActor [weak self] in
+                self?.fireStuckBuffering()
+            }
+        }
+        RunLoop.main.add(timer, forMode: .common)
+        bufferingWatchdog = timer
+    }
+
+    /// Called when `isBuffering` has stayed continuously true past `bufferingTimeoutSeconds` —
+    /// treated exactly like the track finishing (skip forward), but first tears down the stuck
+    /// item explicitly (per SPEC.md's "kill it" decision) rather than leaving it buffering in the
+    /// background while whatever plays next loads.
+    private func fireStuckBuffering() {
+        guard !hasFiredFinishForCurrentItem else { return }
+        player.pause()
+        player.replaceCurrentItem(with: nil)
+        fireFinish()
+    }
+
     private func fireFinish() {
         guard !hasFiredFinishForCurrentItem else { return }
         hasFiredFinishForCurrentItem = true
@@ -226,6 +265,7 @@ final class AudioPlayer: ObservableObject {
             NotificationCenter.default.removeObserver(observer)
         }
         knownEndWatchdog?.invalidate()
+        bufferingWatchdog?.invalidate()
         if let token = backgroundActivityToken {
             ProcessInfo.processInfo.endActivity(token)
         }

@@ -373,7 +373,14 @@ observable). Same PATH-hardening as `yt-dlp` above — see `FfmpegAvailability.s
   for BGM's startup-latency fix — see `PlaybackController.swift`'s `playBGM` entry below and
   SPEC.md's "BGM channel playback" — "Startup latency for long videos") instead resolves via
   `best[acodec!=none][vcodec!=none]`, yt-dlp's legacy progressive (audio+video combined,
-  faststart) format selector — used by BGM only.
+  faststart) format selector — used by BGM only. **`resolveTimeout`** (`playback-engine-007`,
+  2026-08-13, see SPEC.md's "Resolution and buffering timeouts"): `resolve` now passes a 10s
+  timeout down to `YtDlpRunner.run`, fixing a real bug found live — this call previously had no
+  bound at all, so a stalled `yt-dlp -g` could leave a caller (any of `TrackAvailabilityResolver`/
+  `NextTrackPreloader`/`PlaybackController.playBGM`) awaiting it forever, stranding the UI on a
+  permanent loading spinner. A timeout throws `ResolutionError.timedOut`, which every existing
+  caller already treats the same as any other non-`ytDlpNotFound` failure (skip like an
+  unavailable track) — no call-site changes needed for the new case itself.
 - `Sources/PlaylistBar/AudioPlayer.swift` — `AudioPlayer`, wraps a single `AVPlayer`: load/play/
   pause/stop plus an `onFinish` callback for natural track completion. Exposes `volume` (0.0–1.0)
   as a thin pass-through to `AVPlayer.volume` itself — a player-level property, so it applies
@@ -510,7 +517,15 @@ observable). Same PATH-hardening as `yt-dlp` above — see `FfmpegAvailability.s
   (+ Homebrew dirs) check for `yt-dlp`.
 - `Sources/PlaylistBar/YtDlpRunner.swift` — shared subprocess execution for yt-dlp: resolves its
   absolute path via `YtDlpLocator` (not bare-name PATH lookup) and runs it with an argument array,
-  draining stdout/stderr concurrently to avoid a pipe-buffer deadlock on large output.
+  draining stdout/stderr concurrently to avoid a pipe-buffer deadlock on large output. **`run(
+  arguments:timeout:)`** (`playback-engine-007`, 2026-08-13): an optional `Duration` timeout,
+  `nil` by default so `PlaylistScanner`/`BGMChannelScanner`'s existing calls (a full playlist/
+  channel scan legitimately takes longer than any single-video call) are unaffected. When set, the
+  pipe-draining `DispatchGroup.wait` is given a deadline; on timeout the subprocess is
+  `terminate()`d (not left running in the background — a stream-resolve stall reads as more likely
+  a genuine hang than a merely-slow analysis, unlike the loudness-analysis timeout elsewhere in
+  this codebase, which deliberately does let its loser keep running), then waited on again
+  (now-fast, since termination closes the pipes) before throwing `RunError.timedOut`.
 - `Sources/PlaylistBar/LoginItemManager.swift` — wraps `SMAppService.mainApp` register/unregister/
   status for the Launch-at-Login toggle. Only works against the real packaged `.app` (see
   `Scripts/package-app.sh` above) — throws against a bare `swift build` executable.
@@ -528,9 +543,36 @@ observable). Same PATH-hardening as `yt-dlp` above — see `FfmpegAvailability.s
   located via `CGWindowListCopyWindowInfo` by owning pid since it never appears in
   `kAXWindowsAttribute`, then hit-tested into an `AXUIElement` via
   `AXUIElementCopyElementAtPosition` — select a playlist, click a track row by label, screenshot).
-  `Scenarios.swift` is the ~20-scenario suite (`Report.swift`'s `ScenarioCategory` distinguishes
+  `Scenarios.swift` is the ~21-scenario suite (`Report.swift`'s `ScenarioCategory` distinguishes
   plain `ui` scenarios from `regression`/`codeInvariant`/`obsolete` ones); `main.swift` is the CLI
   entry (`--bundle-id`/`--report`/`--screenshot-dir`/`--wait-timeout`/`--skip-ytdlp-outage`).
+  **`21-stream-resolve-timeout-bounded`** (added 2026-08-13, regression coverage for
+  `playback-engine-007`): temporarily renames the real `yt-dlp` aside and writes a shim in its
+  place that hangs 30s on its first-ever invocation (via `exec sleep 30`, replacing the shell's
+  own process image so `process.terminate()` kills the actual hung process directly, not a
+  forked child of it) then delegates to the real, hidden binary on every call after — same
+  reversible rename-and-restore shape as `17-ytdlp-outage-error-handling`'s existing pattern, but
+  this scenario *also* writes new content back to the original path, which its first version's
+  `FileManager.moveItem`-based cleanup didn't account for (that call throws, silently via `try?`,
+  when its destination already exists) — every run left the shim in place, papered over only by
+  `Scripts/qc.sh`'s own `mv`-based safety net, until fixed to clear the destination first. Switches
+  to a different playlist, then to the shimmed target, as its trigger (found live: reselecting an
+  already-active playlist wasn't always a reliable fresh trigger, and a naive single global
+  "has this ever hung" marker could race against `NextTrackPreloader`'s own background resolve for
+  a different track). Still has known, harmless (never false-positive) residual timing flakiness
+  — see its own doc comment and `playback-engine-007`'s "Live verification" note for the full
+  account of what was chased down versus what's still open.
+  **Readiness-check race, found and fixed 2026-08-13** on this harness's first real end-to-end
+  run: `main.swift`'s startup wait treated successfully constructing `PopoverController` (which
+  only confirms the app process is registered with `NSRunningApplication`) as "the app is ready" —
+  but that happens as soon as `open` returns, well before SwiftUI has actually finished setting up
+  `MenuBarExtra`'s status item. Every one of ~18 scenarios failed identically and instantly
+  (`0.0s`, "app has no AXExtrasMenuBar") because the whole suite ran before the status item
+  genuinely existed — confirmed as a harness-only bug, not a real regression, by querying the same
+  running app directly via `osascript`/System Events immediately afterward and getting a valid
+  `AXExtrasMenuBar` back. Fixed by folding a `statusItemLabel()` check into the same readiness
+  wait, so "ready" now means the status item is actually queryable, not just that the process
+  exists.
 - `Scripts/qc.sh` — orchestrates the harness: kills any running instance, clean-builds via
   `package-app.sh`, builds `QCHarness`, launches, runs the full scenario suite, writes
   `qc-report.json` + `qc-screenshots/` (both gitignored), prints a pass/fail summary, and restores
@@ -626,6 +668,41 @@ still recommended (not yet run) before considering this release-ready.
   dead video id into a real fixed playlist to force it live — user accepted the existing
   standalone-script verification (see that issue's Notes) as sufficient here too. Both are
   deliberately *not* being carried forward as open action items in future `/qc` passes.
+  **Gained and completed a new issue, 2026-08-13** (`playback-engine-007`, found live via
+  `/interview` after a real stuck-spinner incident — see the `YtDlpRunner.swift`/
+  `StreamResolver.swift`/`AudioPlayer.swift` entries above and SPEC.md's "Resolution and buffering
+  timeouts"): bounded timeouts for stream resolution (10s) and playback buffering (20s), both
+  previously unbounded and both capable of stranding the UI on a permanent loading spinner forever
+  — unlike the loudness-analysis wait, which was already correctly bounded. Either timeout now
+  auto-skips to the next track, same as an unavailable one.
+  **Live-verified the same day (2026-08-13)**, with the user's explicit go-ahead to briefly swap
+  their real `yt-dlp` for a slow shim: a new permanent regression scenario,
+  `21-stream-resolve-timeout-bounded` (see the `Sources/QCHarness/` entry below), confirmed the
+  resolve-timeout half end-to-end — clean runs clear the loading spinner in ~12-18s and land on a
+  genuinely playable track, and an out-of-band `ps`-based process monitor independently confirmed
+  the hung shim subprocess is actually killed (observed alive, then genuinely gone, well inside
+  the 10s bound), not just abandoned in the background. Two real bugs were found and fixed along
+  the way, both in the *test scaffolding*, not the production fix: a `FileManager.moveItem`
+  cleanup bug that silently failed to restore the real binary every run, and residual (safe, never
+  false-positive) timing flakiness in the scenario's trigger setup — see
+  `playback-engine-007`'s "Live verification" note for the full account, including what's still
+  open. The playback-buffering-watchdog half (the other, harder-to-force half of this issue) was
+  **not** separately live-verified — would need meaningfully more new test infrastructure (a local
+  server that stalls mid-response) than was in scope for this pass; still resting on code review
+  and the same already-proven pattern. Given the resolve-timeout half now has real, repeated,
+  independently-confirmed live verification, this is no longer treated as an unverified gap the
+  way it was earlier the same day — the buffering-watchdog half remains the one part still worth
+  a dedicated future pass.
+  **`/qc` pass, 2026-08-13 — re-confirmed `qc-passed`**: the automated harness (20/21 scenarios
+  passed, one obsolete skip — see `Sources/QCHarness/` above) re-verified every previously-passing
+  scenario across this and other bundled features with no regression from tonight's changes, plus
+  the new `21-stream-resolve-timeout-bounded` regression scenario specifically covering
+  `playback-engine-007`'s resolve-timeout half (repeated clean passes, ~12-18s, plus an
+  independent out-of-band process-kill confirmation — see above). Not exhaustive: the
+  buffering-watchdog half of `playback-engine-007` remains an open, disclosed gap (not
+  live-verified, not permanently accepted the way the two 2026-08-11 gaps are) — worth a dedicated
+  future pass with purpose-built stalling-server infrastructure, not treated as blocking this
+  promotion back to `qc-passed` given everything else re-confirmed cleanly.
 - **player-state**: `qc-passed` (2026-08-11, first full pass — previously `ready-for-qc`/
   `not-ready`, never tested as its own feature before). `player-state-001`/`002` (last-played-
   track and last-active-playlist persistence) and the newer `player-state-003` (seek-position

@@ -136,6 +136,26 @@ that ongoing cost once startup speed no longer depended on it.
   agent) measures each track's loudness for volume normalization — see "Volume & loudness
   normalization" below. Added 2026-08-09.
 
+### Resolution and buffering timeouts (added 2026-08-13)
+
+Two waits in the playback path previously had no time bound at all, which could strand the UI on
+a permanent loading spinner with no recovery — found live when a track finished, auto-advance
+began resolving the next one, and it never started (confirmed the app process itself was fine;
+nothing was ever going to un-stick it). Both are now bounded:
+
+- **Stream resolution** (the `yt-dlp -g` call for a single video, used by manual navigation,
+  auto-advance, the next-track preloader, and BGM alike): bounded to **10 seconds**. On timeout,
+  the `yt-dlp` subprocess is killed rather than left running in the background.
+- **Playback buffering** (`AVPlayer` stuck in `waitingToPlayAtSpecifiedRate` after a stream URL
+  has already resolved successfully — a different failure point than resolution itself, and what
+  actually happened in the incident above): bounded to **20 seconds** of continuous buffering,
+  same value for BGM and the 4 fixed playlists (BGM's long-video startup-latency fix already
+  addresses legitimately-slow starts by resolving a faststart format — see "BGM channel playback"
+  — so it doesn't need a separately longer allowance here). On timeout, the current `AVPlayer`
+  item is torn down rather than left buffering indefinitely.
+- Either timeout is treated exactly like an unavailable track (see "Behavior rules"): playback
+  automatically skips to the next track rather than surfacing an error or retrying the same track.
+
 ## Playlist data & caching
 
 - Playlist contents (video ID + title, in playlist order) are fetched via
@@ -305,6 +325,9 @@ Stored locally (JSON, in the same Application Support directory), no database, n
   auto-advance; playback moves to the next track without stopping. (Track list display for a
   known-unavailable track may be visually de-emphasized — implementation detail, not a hard
   requirement.)
+- **Stream resolution or buffering that never completes** (see "Resolution and buffering
+  timeouts" under "Playback engine"): treated the same as an unavailable track once its timeout
+  elapses — automatically skipped, playback moves to the next track without stopping.
 - **Clicking a track** in the previous/next list jumps directly to it and plays immediately,
   updating the saved position.
 - Only one playlist plays at a time; switching stops whatever was previously playing.
@@ -366,8 +389,11 @@ observe.
   (`bgm-006`), the hung-loading-spinner race (`volume-control-007`), duplicate error banners and
   the vanishing track list on a mid-session yt-dlp outage (`menu-bar-ui-005`, opt-in since it
   briefly renames the real `yt-dlp` binary — reversible, with a `defer`-based restore plus a
-  bash-side safety net), the `ScrollView` collapse (`menu-bar-ui-003`), and the icon-only label's
-  playing/paused glyph swap (`menu-bar-ui-004`). The one exception is the ~2x
+  bash-side safety net), the `ScrollView` collapse (`menu-bar-ui-003`), the icon-only label's
+  playing/paused glyph swap (`menu-bar-ui-004`), and the unbounded-stream-resolve stuck-spinner bug
+  (`playback-engine-007`, added 2026-08-13 — same reversible real-`yt-dlp`-renaming approach, this
+  time swapping in a shim that hangs on its first invocation to force the 10s resolve timeout).
+  The one exception is the ~2x
   `AVFoundation`-duration-estimation bug (`playback-engine-005`): reproducing it live would mean
   playing a real track for several minutes, so that scenario is a **code-invariant check** instead
   — it asserts the trusted-duration watchdog (`AudioPlayer.swift`'s `knownEndWatchdog`) is still

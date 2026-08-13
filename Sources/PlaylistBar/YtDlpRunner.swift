@@ -14,9 +14,21 @@ enum YtDlpRunner {
     enum RunError: Error {
         case ytDlpNotFound
         case launchFailed(Error)
+        /// `timeout` elapsed before the process finished — it has already been terminated by the
+        /// time this is thrown. See `StreamResolver`'s own timeout, the caller that actually sets
+        /// this for single-video resolution (playlist/channel scans pass no timeout, since a full
+        /// scan legitimately takes longer and isn't part of the "stuck spinner" failure mode this
+        /// exists for — see SPEC.md's "Resolution and buffering timeouts").
+        case timedOut
     }
 
-    static func run(arguments: [String]) throws -> Result {
+    /// Runs `yt-dlp` with `arguments`, optionally bounded by `timeout`. On timeout, the
+    /// subprocess is terminated (not left running in the background) and `RunError.timedOut` is
+    /// thrown — deliberately not "stop waiting but let it finish," unlike the loudness-analysis
+    /// timeout elsewhere in this codebase: a stream-resolve stall is more likely a genuine hang
+    /// than a merely-slow analysis, and leaving terminated subprocesses to pile up in the
+    /// background across many stuck tracks would leak resources over a long session.
+    static func run(arguments: [String], timeout: Duration? = nil) throws -> Result {
         guard case .available(let path) = YtDlpLocator.checkAvailability() else {
             throw RunError.ytDlpNotFound
         }
@@ -57,7 +69,22 @@ enum YtDlpRunner {
             stderrData = stderrHandle.readDataToEndOfFile()
             group.leave()
         }
-        group.wait()
+
+        if let timeout {
+            // `group.wait(timeout:)` bounds only the pipe drains, not the process itself — a
+            // process that's still running but simply hasn't produced output yet would otherwise
+            // report "timed out" while still alive. Terminating it first is what actually makes
+            // the drains finish promptly afterward (closing the pipes), so the unconditional
+            // `group.wait()` below returns quickly rather than needing its own timeout too.
+            if group.wait(timeout: .now() + timeout.timeInterval) == .timedOut {
+                process.terminate()
+                group.wait()
+                process.waitUntilExit()
+                throw RunError.timedOut
+            }
+        } else {
+            group.wait()
+        }
 
         process.waitUntilExit()
 
@@ -66,5 +93,12 @@ enum YtDlpRunner {
             errorOutput: String(data: stderrData, encoding: .utf8) ?? "",
             exitCode: process.terminationStatus
         )
+    }
+}
+
+private extension Duration {
+    var timeInterval: TimeInterval {
+        let components = self.components
+        return TimeInterval(components.seconds) + TimeInterval(components.attoseconds) / 1e18
     }
 }

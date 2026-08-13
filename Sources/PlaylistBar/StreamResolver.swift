@@ -19,7 +19,19 @@ enum StreamResolver {
         case ytDlpNotFound
         case processFailed(exitCode: Int32, errorOutput: String)
         case invalidOutput
+        /// `resolveTimeout` elapsed with no result — every caller (`TrackAvailabilityResolver`,
+        /// `NextTrackPreloader`, `PlaybackController.playBGM`) already treats any non-
+        /// `ytDlpNotFound` error the same as an unavailable track (skip and move on), so this
+        /// needs no special handling at those call sites — see SPEC.md's "Resolution and
+        /// buffering timeouts".
+        case timedOut
     }
+
+    /// How long a single video's stream resolution is allowed to take before giving up — bounds
+    /// what was previously an unbounded `yt-dlp -g` call that could leave the UI on a permanent
+    /// loading spinner if it ever stalled. A single-video resolve normally takes 1-3s; 10s leaves
+    /// real margin for network variance. See SPEC.md's "Resolution and buffering timeouts".
+    static let resolveTimeout: Duration = .seconds(10)
 
     /// yt-dlp error messages that indicate the video is genuinely gone (deleted/private/
     /// region-locked/age-gated) rather than some other failure (network hiccup, rate limiting,
@@ -66,13 +78,16 @@ enum StreamResolver {
             let formatSelector = preferProgressive
                 ? "best[acodec!=none][vcodec!=none]"
                 : "bestaudio[ext=m4a]/bestaudio"
-            result = try YtDlpRunner.run(arguments: [
-                "-f", formatSelector, "--print", "%(duration)s", "-g", watchURL,
-            ])
+            result = try YtDlpRunner.run(
+                arguments: ["-f", formatSelector, "--print", "%(duration)s", "-g", watchURL],
+                timeout: Self.resolveTimeout
+            )
         } catch YtDlpRunner.RunError.ytDlpNotFound {
             throw ResolutionError.ytDlpNotFound
         } catch YtDlpRunner.RunError.launchFailed(let underlying) {
             throw ResolutionError.processFailed(exitCode: -1, errorOutput: "\(underlying)")
+        } catch YtDlpRunner.RunError.timedOut {
+            throw ResolutionError.timedOut
         }
 
         guard result.exitCode == 0 else {
