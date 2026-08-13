@@ -515,6 +515,27 @@ observable). Same PATH-hardening as `yt-dlp` above — see `FfmpegAvailability.s
   status for the Launch-at-Login toggle. Only works against the real packaged `.app` (see
   `Scripts/package-app.sh` above) — throws against a bare `swift build` executable.
 - `Packaging/Info.plist`, `Scripts/package-app.sh` — see "Build & run" above.
+- `Sources/QCHarness/` — automated QC harness (added 2026-08-13, see SPEC.md's "Automated QC
+  harness" for the full writeup). A second executable target driving the packaged `.app` from the
+  outside via the Accessibility (AXUIElement) API — not XCUITest, since this is a Swift Package
+  with no UI-test-bundle target type. `AX.swift` wraps the raw AXUIElement C API (attribute
+  read/write, tree search — depth-first, order-preserving; an earlier `popLast()`-stack version
+  silently reversed sibling order and produced a confusing false failure, see its own doc comment)
+  plus real synthetic mouse/keyboard input (`Input.click`/`dismissAnyOpenMenu`) — used over
+  `kAXPressAction` for buttons after finding live that AXPress on this app's SwiftUI controls is
+  occasionally a no-op that still reports success. `PopoverController.swift` is the high-level API
+  (find the status item via the per-app `AXExtrasMenuBar` attribute, open/close the popover —
+  located via `CGWindowListCopyWindowInfo` by owning pid since it never appears in
+  `kAXWindowsAttribute`, then hit-tested into an `AXUIElement` via
+  `AXUIElementCopyElementAtPosition` — select a playlist, click a track row by label, screenshot).
+  `Scenarios.swift` is the ~20-scenario suite (`Report.swift`'s `ScenarioCategory` distinguishes
+  plain `ui` scenarios from `regression`/`codeInvariant`/`obsolete` ones); `main.swift` is the CLI
+  entry (`--bundle-id`/`--report`/`--screenshot-dir`/`--wait-timeout`/`--skip-ytdlp-outage`).
+- `Scripts/qc.sh` — orchestrates the harness: kills any running instance, clean-builds via
+  `package-app.sh`, builds `QCHarness`, launches, runs the full scenario suite, writes
+  `qc-report.json` + `qc-screenshots/` (both gitignored), prints a pass/fail summary, and restores
+  `yt-dlp` if an interrupted run left it renamed (belt-and-suspenders on top of the harness's own
+  `defer`-based restore). The `qc` skill now runs this first — see SPEC.md.
 
 No test suite yet — flagged in `issues/app-shell/001-menu-bar-scaffold.md` rather than added
 unilaterally; every issue was instead verified with standalone `swift` scripts run outside the

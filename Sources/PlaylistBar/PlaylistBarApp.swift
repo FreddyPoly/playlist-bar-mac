@@ -27,6 +27,12 @@ struct PlaylistBarApp: App {
             // NSStatusItem — not worth it for a hover tooltip; user decision via `/interview`,
             // 2026-08-12.
             Image(systemName: controller.isPlaying ? "music.note" : "pause.circle")
+                // Lets an AX-based automation harness (Scripts/qc.sh's QCHarness) read
+                // play/pause state directly off the status item without opening the popover,
+                // and gives the status item itself a stable identifier to find among any other
+                // app's menu bar extras.
+                .accessibilityIdentifier("PlaylistBar.menuBarIcon")
+                .accessibilityLabel(controller.isPlaying ? "Playing" : "Paused")
                 .task {
                     await controller.restoreLastSession()
                 }

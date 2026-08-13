@@ -339,6 +339,52 @@ Stored locally (JSON, in the same Application Support directory), no database, n
 - **Media keys**: F7/F8/F9 (previous/play-pause/next) control playback system-wide, even when the
   menu bar dropdown is closed.
 
+## Automated QC harness
+
+Added 2026-08-13 to eliminate manual guided QC as the *first* pass — repeated rounds of clicking
+the menu bar and reporting what's seen had caused false positives from stale app instances and
+"still empty" debugging loops that were really just testing an old build. `Scripts/qc.sh` now runs
+first (wired into the `qc` skill); a human only gets asked about what it structurally can't
+observe.
+
+- **Why AXUIElement, not XCUITest**: this is a Swift Package (`Package.swift`), not a
+  hand-authored `.xcodeproj` (see "Build & run" in CLAUDE.md) — SPM has no UI-test-bundle target
+  type that can host `XCUIApplication` against an external app. `Sources/QCHarness` is instead a
+  plain executable target that drives the packaged `.app` from the outside via the Accessibility
+  (AXUIElement) API — the same mechanism VoiceOver and other assistive tech use — requiring
+  Accessibility permission granted to whatever process runs it (System Settings > Privacy &
+  Security > Accessibility).
+- **What it does**: `Scripts/qc.sh` kills any running instance, does a clean build into a real
+  `.app` bundle (via `Scripts/package-app.sh`), launches it, waits for readiness, opens the menu
+  bar popover, and drives ~20 scenarios — enumerating the track list, reading the title/labels,
+  clicking transport controls, switching every playlist including BGM, and reading back state —
+  each via the same accessibility identifiers/labels/values the SwiftUI views expose
+  (`ContentView.swift`/`PlaylistBarApp.swift`). It writes a machine-readable `qc-report.json` and
+  screenshots of the popover window only (never the full screen — see below).
+- **Regression coverage**: dedicated scenarios re-test every previously-found-and-fixed bug listed
+  in CLAUDE.md's per-feature QC history — BGM switch-away/switch-back history duplication
+  (`bgm-006`), the hung-loading-spinner race (`volume-control-007`), duplicate error banners and
+  the vanishing track list on a mid-session yt-dlp outage (`menu-bar-ui-005`, opt-in since it
+  briefly renames the real `yt-dlp` binary — reversible, with a `defer`-based restore plus a
+  bash-side safety net), the `ScrollView` collapse (`menu-bar-ui-003`), and the icon-only label's
+  playing/paused glyph swap (`menu-bar-ui-004`). The one exception is the ~2x
+  `AVFoundation`-duration-estimation bug (`playback-engine-005`): reproducing it live would mean
+  playing a real track for several minutes, so that scenario is a **code-invariant check** instead
+  — it asserts the trusted-duration watchdog (`AudioPlayer.swift`'s `knownEndWatchdog`) is still
+  present, not a live behavioral replay. The 40-then-20-character menu bar *title text* truncation
+  this backlog originally wanted covered no longer applies at all — it was removed outright by the
+  icon-only label change (see CLAUDE.md's "Icon-only label" note) — so that scenario is recorded as
+  `obsolete`/skipped rather than silently dropped.
+- **What it still can't do**: confirm audio actually *sounds* right (no glitches, correct track),
+  a physical media-key press (F7/F8/F9), whether a tooltip visually renders, or any judgment call
+  that isn't reducible to an accessibility-tree assertion. Those stay in the `qc` skill's manual
+  walkthrough.
+- **Screenshot safety**: screenshots are captured by CoreGraphics window ID
+  (`screencapture -l<windowNumber>`) scoped to the app's own popover window, never a full-screen
+  grab — found live while building this that a naive full-screen capture can catch whatever
+  unrelated content happens to be on screen at the time (an early prototype accidentally captured
+  the developer's own email client).
+
 ## Explicitly out of scope
 
 - No support for playlists beyond the 4 fixed ones and BGM; no UI to add/remove/edit the 4 fixed

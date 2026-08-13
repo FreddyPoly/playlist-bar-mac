@@ -14,21 +14,27 @@ struct ContentView: View {
         VStack(alignment: .leading, spacing: 8) {
             Text("Playlist Bar")
                 .font(.headline)
+                .accessibilityIdentifier("PlaylistBar.title")
 
             // A missing yt-dlp is also what causes `controller.errorMessage` to end up set to a
             // yt-dlp-not-found message (play() surfaces the same underlying condition) — showing
             // both at once would just duplicate the same guidance twice, so this check takes
             // priority and controller.errorMessage only renders when it isn't already covered.
+            // The two branches carry distinct accessibility identifiers specifically so an
+            // automated QC harness can assert at most one is ever present at a time
+            // (menu-bar-ui-005's duplicate-banner regression).
             if case .unavailable = ytDlpAvailability {
                 Text("yt-dlp not found — run `brew install yt-dlp`, then relaunch.")
                     .font(.callout)
                     .foregroundStyle(.red)
                     .fixedSize(horizontal: false, vertical: true)
+                    .accessibilityIdentifier("PlaylistBar.ytdlpMissingBanner")
             } else if let errorMessage = controller.errorMessage {
                 Text(errorMessage)
                     .font(.callout)
                     .foregroundStyle(.red)
                     .fixedSize(horizontal: false, vertical: true)
+                    .accessibilityIdentifier("PlaylistBar.errorBanner")
             }
 
             Picker("Playlist", selection: playlistSelection) {
@@ -39,6 +45,8 @@ struct ContentView: View {
                 Text(PlaybackController.bgmPlaylist.name).tag(Optional(PlaybackController.bgmPlaylist))
             }
             .labelsHidden()
+            .accessibilityIdentifier("PlaylistBar.playlistPicker")
+            .accessibilityValue(controller.currentPlaylist?.name ?? "None")
 
             HStack(spacing: 16) {
                 Button {
@@ -47,6 +55,7 @@ struct ContentView: View {
                     Image(systemName: "backward.fill")
                 }
                 .disabled(controller.currentIndex == nil)
+                .accessibilityIdentifier("PlaylistBar.previousButton")
 
                 Button {
                     Task { await controller.togglePlayPause() }
@@ -61,6 +70,12 @@ struct ContentView: View {
                     }
                 }
                 .disabled(controller.currentIndex == nil)
+                .accessibilityIdentifier("PlaylistBar.playPauseButton")
+                // "Loading" is what Scripts/qc.sh's harness polls for to time how long a
+                // waiting state lasts (volume-control-007's hung-spinner regression) —
+                // distinct from "Play"/"Pause" so the harness can tell a stall apart from
+                // ordinary steady-state playback without reading pixels.
+                .accessibilityLabel(showLoadingIndicator ? "Loading" : (controller.isPlaying ? "Pause" : "Play"))
 
                 Button {
                     Task { await controller.next() }
@@ -68,6 +83,7 @@ struct ContentView: View {
                     Image(systemName: "forward.fill")
                 }
                 .disabled(controller.currentIndex == nil)
+                .accessibilityIdentifier("PlaylistBar.nextButton")
 
                 Button {
                     Task { await controller.reset() }
@@ -75,6 +91,7 @@ struct ContentView: View {
                     Image(systemName: "arrow.counterclockwise")
                 }
                 .disabled(controller.currentIndex == nil)
+                .accessibilityIdentifier("PlaylistBar.resetButton")
             }
             .buttonStyle(.borderless)
             .frame(maxWidth: .infinity)
@@ -83,6 +100,7 @@ struct ContentView: View {
                 Image(systemName: "speaker.fill")
                     .foregroundStyle(.secondary)
                 Slider(value: volumeBinding, in: 0...1)
+                    .accessibilityIdentifier("PlaylistBar.volumeSlider")
                 Image(systemName: "speaker.wave.3.fill")
                     .foregroundStyle(.secondary)
             }
@@ -122,6 +140,12 @@ struct ContentView: View {
                                 .frame(maxWidth: .infinity, alignment: .leading)
                             }
                             .buttonStyle(.plain)
+                            // Not `.accessibilityIdentifier` per-row: SwiftUI collapses individual
+                            // identifiers inside this ForEach down to the container's, observed
+                            // live while building Scripts/qc.sh's harness — label/value (which
+                            // *do* stay per-row) are what the harness matches rows on instead.
+                            .accessibilityLabel(item.track.title)
+                            .accessibilityValue(item.index == controller.bgmCurrentHistoryIndex ? "current" : "")
                         }
                     } else {
                         ForEach(displayedTracks) { item in
@@ -138,15 +162,19 @@ struct ContentView: View {
                                     .frame(maxWidth: .infinity, alignment: .leading)
                             }
                             .buttonStyle(.plain)
+                            .accessibilityLabel(item.track.title)
+                            .accessibilityValue(item.index == controller.currentIndex ? "current" : "")
                         }
                     }
                 }
+                .accessibilityIdentifier("PlaylistBar.trackListContent")
             }
             // minHeight is required, not just maxHeight: a ScrollView given only a max height
             // inside MenuBarExtra's auto-sizing window can resolve its ideal height to ~0 even
             // with real content inside it, collapsing the whole list to an invisible sliver.
             // 130 was tuned to show ~4 rows at a glance before scrolling.
             .frame(minHeight: 130, maxHeight: 220)
+            .accessibilityIdentifier("PlaylistBar.trackList")
 
             Divider()
 
@@ -154,12 +182,14 @@ struct ContentView: View {
                 get: { loginItemManager.isEnabled },
                 set: { loginItemManager.setEnabled($0) }
             ))
+            .accessibilityIdentifier("PlaylistBar.launchAtLoginToggle")
 
             Divider()
 
             Button("Quit") {
                 NSApplication.shared.terminate(nil)
             }
+            .accessibilityIdentifier("PlaylistBar.quitButton")
         }
         .padding()
         .frame(width: 280)

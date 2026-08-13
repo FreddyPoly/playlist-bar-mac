@@ -3,3 +3,5 @@
 dist/
 *.xcodeproj
 .DS_Store
+qc-report.json
+qc-screenshots/
