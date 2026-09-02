@@ -381,6 +381,29 @@ observable). Same PATH-hardening as `yt-dlp` above — see `FfmpegAvailability.s
   permanent loading spinner. A timeout throws `ResolutionError.timedOut`, which every existing
   caller already treats the same as any other non-`ytDlpNotFound` failure (skip like an
   unavailable track) — no call-site changes needed for the new case itself.
+  **Real incident, 2026-09-02** (found via `/interview`): selecting a track in Rock3 triggered
+  `TrackAvailabilityResolver`'s internal auto-skip loop through ~60 consecutive tracks in one
+  click (that loop retries silently with no UI update per attempt — see its own doc comment) and
+  even the track it finally landed on stayed stuck on the loading spinner. Root cause: `yt-dlp`
+  was 6 weeks out of date on this machine (2026.07.04 vs. Homebrew stable 2026.08.19) — YouTube
+  periodically breaks older yt-dlp versions. Fixed by `brew upgrade yt-dlp`; re-verified live
+  (all previously-failing tracks, including the one it got stuck on, now resolve in 1-3s; no app
+  restart needed since `YtDlpRunner` resolves the yt-dlp binary path fresh per call, never
+  cached). Caveat: the very first track tested had actually resolved fine even on the old
+  version in isolation, so this may have compounded a YouTube-side rate-limit/burst event rather
+  than the old version being uniformly broken — user confirmed this was a first-time occurrence,
+  so it's being treated as resolved rather than chased further. **Real gap found and fixed
+  alongside this**: every resolution failure that isn't a recognized "video genuinely gone" case
+  was being swallowed into a generic UI message (`PlaybackController`'s `"Couldn't play this
+  track — check your network connection."`) with no record anywhere of the real yt-dlp error —
+  there was no way to tell an outdated-yt-dlp failure apart from rate-limiting apart from a
+  genuinely broken extractor. Fixed by logging the actual failure (exit code + stderr for a
+  process failure, or the timeout itself) via `os.log` right where each error originates in
+  `resolve` — viewable via Console.app or `log show --predicate 'subsystem ==
+  "com.studiobleumoutarde.PlaylistBar"'` — chosen over a custom log file since this app has no
+  existing logging infrastructure to extend. A stagger/backoff between the auto-skip loop's rapid
+  consecutive attempts was considered (rapid-fire calls could themselves provoke rate-limiting)
+  but deliberately not added — user judged it unnecessary for what's currently a one-off.
 - `Sources/PlaylistBar/AudioPlayer.swift` — `AudioPlayer`, wraps a single `AVPlayer`: load/play/
   pause/stop plus an `onFinish` callback for natural track completion. Exposes `volume` (0.0–1.0)
   as a thin pass-through to `AVPlayer.volume` itself — a player-level property, so it applies

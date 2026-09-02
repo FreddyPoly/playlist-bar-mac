@@ -1,4 +1,5 @@
 import Foundation
+import os
 
 enum StreamResolution: Equatable {
     /// `duration` is the video's real duration (seconds) per yt-dlp's own metadata — `nil` if
@@ -15,6 +16,15 @@ enum StreamResolution: Equatable {
 }
 
 enum StreamResolver {
+    /// Every resolution failure that isn't a recognized "video genuinely gone" case used to be
+    /// swallowed into a generic UI message with no record of the real yt-dlp error anywhere —
+    /// found during a live incident (2026-09-02) where dozens of consecutive tracks failed to
+    /// resolve and there was no way to tell whether that was an outdated yt-dlp, YouTube rate-
+    /// limiting, or something else. Logged via `os.log` (viewable in Console.app or `log show
+    /// --predicate 'subsystem == "com.studiobleumoutarde.PlaylistBar"'`) rather than a custom
+    /// file, since this app has no existing logging infrastructure to extend.
+    private static let logger = Logger(subsystem: "com.studiobleumoutarde.PlaylistBar", category: "StreamResolver")
+
     enum ResolutionError: Error {
         case ytDlpNotFound
         case processFailed(exitCode: Int32, errorOutput: String)
@@ -85,8 +95,10 @@ enum StreamResolver {
         } catch YtDlpRunner.RunError.ytDlpNotFound {
             throw ResolutionError.ytDlpNotFound
         } catch YtDlpRunner.RunError.launchFailed(let underlying) {
+            logger.error("yt-dlp launch failed for \(videoID, privacy: .public): \(String(describing: underlying), privacy: .public)")
             throw ResolutionError.processFailed(exitCode: -1, errorOutput: "\(underlying)")
         } catch YtDlpRunner.RunError.timedOut {
+            logger.error("yt-dlp resolve timed out (\(Self.resolveTimeout.components.seconds, privacy: .public)s) for \(videoID, privacy: .public)")
             throw ResolutionError.timedOut
         }
 
@@ -95,6 +107,7 @@ enum StreamResolver {
             if unavailabilityMarkers.contains(where: { lowered.contains($0) }) {
                 return .unavailable
             }
+            logger.error("yt-dlp resolve failed for \(videoID, privacy: .public): exit \(result.exitCode, privacy: .public) — \(result.errorOutput, privacy: .public)")
             throw ResolutionError.processFailed(exitCode: result.exitCode, errorOutput: result.errorOutput)
         }
 
