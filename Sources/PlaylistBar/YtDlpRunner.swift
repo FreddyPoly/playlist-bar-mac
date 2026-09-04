@@ -28,6 +28,14 @@ enum YtDlpRunner {
     /// timeout elsewhere in this codebase: a stream-resolve stall is more likely a genuine hang
     /// than a merely-slow analysis, and leaving terminated subprocesses to pile up in the
     /// background across many stuck tracks would leak resources over a long session.
+    /// YouTube now rejects cookie-less requests from this machine outright ("Sign in to confirm
+    /// you're not a bot", even for public playlists/videos — found live 2026-09-04, see SPEC.md's
+    /// "Playback engine" and Security section). Prepended to every call so scans and single-video
+    /// resolution alike authenticate the same way; Brave must be installed and logged into
+    /// YouTube for this to succeed, but a failure here surfaces as an ordinary yt-dlp error
+    /// (unrecognized/unavailable-track handling), not a new special case.
+    private static let cookieArguments = ["--cookies-from-browser", "brave"]
+
     static func run(arguments: [String], timeout: Duration? = nil) throws -> Result {
         guard case .available(let path) = YtDlpLocator.checkAvailability() else {
             throw RunError.ytDlpNotFound
@@ -35,7 +43,7 @@ enum YtDlpRunner {
 
         let process = Process()
         process.executableURL = URL(fileURLWithPath: path)
-        process.arguments = arguments
+        process.arguments = cookieArguments + arguments
 
         let stdoutPipe = Pipe()
         let stderrPipe = Pipe()

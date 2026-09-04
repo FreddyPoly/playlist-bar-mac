@@ -58,6 +58,21 @@ subprocess call has since been exercised live and confirmed working (real measur
 is also where a real timeout-handling bug was found and fixed once real analysis timing was
 observable). Same PATH-hardening as `yt-dlp` above — see `FfmpegAvailability.swift`.
 
+Also requires **Brave**, installed and logged into youtube.com — every yt-dlp call now passes
+`--cookies-from-browser brave` (see `YtDlpRunner.swift` below). Found necessary live on
+2026-09-04: YouTube started rejecting cookie-less requests from this machine outright ("Sign in to
+confirm you're not a bot"), which read in the app as every track getting stuck loading regardless
+of how it was triggered (click/Next/Reset) — not a code bug, see SPEC.md's "Playback engine" and
+Security section for the full writeup. Live-verified against the real packaged `.app` the same day
+across all three trigger paths (track click, Next, Reset) with no further "stuck loading" — no
+macOS Keychain prompt actually appeared for the packaged app (an initial "no prompt = silently
+denied" theory, based on an apparent still-failing retest right after rebuilding, turned out to be
+a red herring: that retest's log window overlapped with the still-shutting-down previous stuck
+instance's trailing log entries, not the new build's own calls — a clean-window re-check showed the
+new build had logged zero errors). One real, minor, expected cost: the first couple of resolves
+after a fresh launch take visibly longer (cold Brave-cookie-store read/decrypt) — shows the normal
+loading spinner a bit longer than usual, then resolves on its own; not a failure, no fix needed.
+
 ## Layout
 
 - `Sources/PlaylistBar/PlaylistBarApp.swift` — app entry point. `MenuBarExtra` with a dynamic
@@ -549,6 +564,22 @@ observable). Same PATH-hardening as `yt-dlp` above — see `FfmpegAvailability.s
   a genuine hang than a merely-slow analysis, unlike the loudness-analysis timeout elsewhere in
   this codebase, which deliberately does let its loser keep running), then waited on again
   (now-fast, since termination closes the pipes) before throwing `RunError.timedOut`.
+  **`cookieArguments`** (2026-09-04, found via `/interview` after a real live "every track stuck
+  loading" incident): `--cookies-from-browser brave` is now prepended to every call's arguments —
+  YouTube began rejecting cookie-less requests from this machine outright (confirmed live outside
+  the app: a bare `yt-dlp -g` call got "Sign in to confirm you're not a bot" on a track that then
+  succeeded once cookies were added), so every yt-dlp invocation authenticates the same way,
+  scans included, not just single-video resolution. Added centrally here rather than per call site
+  so `StreamResolver`/`PlaylistScanner`/`BGMChannelScanner` all get it uniformly. A missing/
+  logged-out Brave surfaces as an ordinary yt-dlp failure — no new special-case handling, same
+  existing unavailable-track/os.log path. See CLAUDE.md's "Build & run" and SPEC.md's "Playback
+  engine"/Security section for the full writeup. **Live-verified 2026-09-04** against the real
+  packaged `.app`: track click, Next, and Reset all resolve and play cleanly with no recurrence of
+  the stuck-loading symptom (confirmed via both the app's own os.log — zero resolve errors in the
+  verified window — and the user directly hearing playback resume). The first couple of resolves
+  right after a fresh app launch are visibly slower than steady-state (cold Brave-cookie-store
+  read/decrypt cost) — shows the existing loading spinner a bit longer, then resolves on its own;
+  confirmed as expected overhead, not a regression, no further action taken.
 - `Sources/PlaylistBar/LoginItemManager.swift` — wraps `SMAppService.mainApp` register/unregister/
   status for the Launch-at-Login toggle. Only works against the real packaged `.app` (see
   `Scripts/package-app.sh` above) — throws against a bare `swift build` executable.

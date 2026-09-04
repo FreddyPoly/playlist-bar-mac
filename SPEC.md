@@ -136,6 +136,29 @@ that ongoing cost once startup speed no longer depended on it.
   agent) measures each track's loudness for volume normalization — see "Volume & loudness
   normalization" below. Added 2026-08-09.
 
+### Cookie authentication for yt-dlp (added 2026-09-04)
+
+Found live: YouTube began rejecting cookie-less `yt-dlp` requests from this machine entirely
+("Sign in to confirm you're not a bot"), which read in the app as every track getting stuck
+loading no matter how it was triggered (track click, Next, Reset) — every resolve attempt failed
+identically, so the auto-skip loop churned through the whole playlist with nothing ever
+succeeding. Confirmed via the app's own logs (100% failure rate across dozens of distinct tracks)
+and reproduced directly with a bare `yt-dlp -g` call outside the app entirely.
+
+Fix: every yt-dlp invocation now passes `--cookies-from-browser brave`, pulling cookies from a
+local Brave browser session logged into youtube.com — added once, centrally, in `YtDlpRunner` (see
+CLAUDE.md's Layout entry) so single-video resolution *and* playlist/channel scans are covered
+alike. Confirmed fixing the exact previously-failing case live. Brave being installed and logged
+into YouTube is now a hard runtime requirement, alongside yt-dlp/ffmpeg — see "Build & run" in
+CLAUDE.md. A missing/logged-out Brave (or any other cookie-decryption failure) surfaces as an
+ordinary yt-dlp error, handled by the same existing unavailable-track/timeout path — no new
+special-case UI or recovery logic. See the Security section below for what this means for cookie
+handling.
+
+Deliberately not changed alongside this: the auto-skip loop's lack of backoff between consecutive
+failed-track attempts (would reduce load on YouTube during an outage-like event, but explicitly
+declined again when this was found — same call as the original one-off decision, not revisited).
+
 ### Resolution and buffering timeouts (added 2026-08-13)
 
 Two waits in the playback path previously had no time bound at all, which could strand the UI on
@@ -428,10 +451,22 @@ observe.
 
 Low risk, small surface:
 
-- **No authentication, no accounts, no OAuth** — all 4 playlists and the BGM channel(s) are
-  public; nothing in the app ever touches Frederic's YouTube account or credentials.
-- **No secrets or API keys** — the yt-dlp approach was specifically chosen to avoid needing a
-  YouTube Data API key or any Google Cloud credential.
+- **No app-level authentication, no accounts, no OAuth of its own** — all 4 playlists and the BGM
+  channel(s) are public; the app has no login of its own and stores no account credentials.
+  **Revised 2026-09-04** (previously read "nothing in the app ever touches Frederic's YouTube
+  account or credentials" — no longer accurate, see below): every yt-dlp call now passes
+  `--cookies-from-browser brave`, so the yt-dlp subprocess reads Frederic's real Brave browser
+  session cookies for youtube.com. This was a deliberate, confirmed decision (via `/interview`,
+  2026-09-04) made necessary by YouTube now rejecting cookie-less requests outright — see
+  "Playback engine" above. Scope of what this actually means: cookies are read locally by yt-dlp
+  (via its own cookie-decryption, which needs one-time macOS Keychain access to Brave's "Safe
+  Storage" key) purely to authenticate the yt-dlp→YouTube HTTP request; the app itself never reads,
+  stores, logs, or transmits the cookies anywhere — they pass straight from Brave's local cookie
+  store, through yt-dlp, to YouTube's own servers, the same as if Frederic were browsing
+  youtube.com in Brave directly. No new persistence, no new network destination.
+- **No secrets or API keys stored/managed by the app** — the yt-dlp approach was specifically
+  chosen to avoid needing a YouTube Data API key or any Google Cloud credential; the browser-cookie
+  auth above is read live from Brave each call, never captured or stored by this app.
 - **No untrusted user input** — the only external data is public YouTube playlist metadata
   (video IDs/titles) and resolved stream URLs, both fetched read-only via yt-dlp. Titles are
   rendered as plain text in SwiftUI views (no HTML/JS execution), so there's no injection surface
