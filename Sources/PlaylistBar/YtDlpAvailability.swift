@@ -15,7 +15,11 @@ enum YtDlpLocator {
         "/usr/local/bin",
     ]
 
-    private static func searchPath() -> String {
+    /// Widened from `private` so `YtDlpRunner` can give the `yt-dlp` subprocess itself this same
+    /// augmented PATH — needed for yt-dlp's own internal lookups (e.g. the `deno`/`node` JS
+    /// runtime it shells out to for solving YouTube's "n" challenge), not just for locating
+    /// `yt-dlp` itself.
+    static func searchPath() -> String {
         let inherited = (ProcessInfo.processInfo.environment["PATH"] ?? "")
             .split(separator: ":")
             .map(String.init)

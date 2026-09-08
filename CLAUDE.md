@@ -552,7 +552,9 @@ loading spinner a bit longer than usual, then resolves on its own; not a failure
   covering round-trip, a "recent-old" file (has `masterVolume`, lacks the new field), a "very-old"
   file (lacks `masterVolume` too), and a fully empty `{}`.
 - `Sources/PlaylistBar/YtDlpAvailability.swift` — `YtDlpLocator.checkAvailability()`, a PATH
-  (+ Homebrew dirs) check for `yt-dlp`.
+  (+ Homebrew dirs) check for `yt-dlp`. `searchPath()` was widened from `private` to internal on
+  2026-09-08 so `YtDlpRunner` can reuse the same augmented PATH for the `yt-dlp` subprocess's own
+  environment, not just for locating `yt-dlp` itself — see that file's entry below.
 - `Sources/PlaylistBar/YtDlpRunner.swift` — shared subprocess execution for yt-dlp: resolves its
   absolute path via `YtDlpLocator` (not bare-name PATH lookup) and runs it with an argument array,
   draining stdout/stderr concurrently to avoid a pipe-buffer deadlock on large output. **`run(
@@ -580,6 +582,27 @@ loading spinner a bit longer than usual, then resolves on its own; not a failure
   right after a fresh app launch are visibly slower than steady-state (cold Brave-cookie-store
   read/decrypt cost) — shows the existing loading spinner a bit longer, then resolves on its own;
   confirmed as expected overhead, not a regression, no further action taken.
+  **`process.environment` PATH fix (2026-09-08, found via `/interview` after another real live
+  "every track stuck loading" incident)**: every single resolve was failing with yt-dlp's own `n
+  challenge solving failed... The page needs to be reloaded` error (confirmed via `os.log` — every
+  video in the playlist cycling through this same failure every few seconds, `TrackAvailability
+  Resolver`'s auto-skip loop never landing on a playable track, which is what read as an infinite
+  spinner). Root cause: yt-dlp itself was launching fine (already hardened via `YtDlpLocator`'s
+  absolute-path resolution), but yt-dlp *internally* shells out to a JS runtime (`deno`, installed
+  at `/opt/homebrew/bin/deno`) via a bare PATH lookup of its own, to solve YouTube's "n" signature
+  challenge — and `Process()` here never set `process.environment`, so that inner lookup inherited
+  the packaged `.app`'s bare default PATH (`/usr/bin:/bin:/usr/sbin:/sbin`, no Homebrew dirs), the
+  same category of GUI-app-PATH gap `YtDlpAvailability.swift`/`FfmpegAvailability.swift` already
+  exist to guard against — just one level deeper (yt-dlp's own dependency, not yt-dlp itself).
+  Reproduced directly outside the app (`env -i PATH="/usr/bin:/bin:/usr/sbin:/sbin" yt-dlp ...`
+  hits the exact same error; the same call with a normal interactive-shell PATH succeeds). Fixed
+  by widening `YtDlpLocator.searchPath()` from `private` to internal and passing
+  `process.environment = ["PATH": YtDlpLocator.searchPath()]` on the `yt-dlp` `Process()` in
+  `YtDlpRunner.run` — reusing the same augmented-PATH logic already built for locating yt-dlp
+  itself, rather than a third duplicate. Verified two ways: a standalone script reproducing the
+  exact stripped-PATH failure and confirming the fix resolves cleanly (exit 0, valid stream URL)
+  under that same stripped PATH, and live against the real packaged `.app` — user confirmed
+  clicking Reset played the first track successfully with no recurrence of the stuck spinner.
 - `Sources/PlaylistBar/LoginItemManager.swift` — wraps `SMAppService.mainApp` register/unregister/
   status for the Launch-at-Login toggle. Only works against the real packaged `.app` (see
   `Scripts/package-app.sh` above) — throws against a bare `swift build` executable.
@@ -757,6 +780,19 @@ still recommended (not yet run) before considering this release-ready.
   live-verified, not permanently accepted the way the two 2026-08-11 gaps are) — worth a dedicated
   future pass with purpose-built stalling-server infrastructure, not treated as blocking this
   promotion back to `qc-passed` given everything else re-confirmed cleanly.
+  **Real incident, 2026-09-08** (found via `/interview`): a fresh "every track stuck loading"
+  report turned out to be a different failure than 2026-09-02's outdated-yt-dlp one, and different
+  again from `playback-engine-007`'s unbounded-timeout one — this time every resolve was actually
+  completing (in a few seconds, well under the 10s timeout) but failing with yt-dlp's own `n
+  challenge solving failed` error, so `TrackAvailabilityResolver`'s auto-skip loop kept cycling
+  through the entire playlist forever, never landing on a track, which still reads as the same
+  "infinite spinner" symptom from the UI's side. Root cause and fix are documented under the
+  `YtDlpRunner.swift` entry above (a missing `process.environment` meant yt-dlp's own internal
+  `deno` lookup, needed to solve YouTube's "n" challenge, couldn't see Homebrew's bin dirs from
+  inside the packaged `.app`). Live-verified: user clicked Reset after the fix and the first track
+  played successfully, with no recurrence. Not a full `/qc` re-pass — this was a targeted incident
+  fix, not a scheduled QC session — so `qc-passed` status here reflects the 2026-08-13 pass above,
+  not a re-confirmation of every scenario after this fix.
 - **player-state**: `qc-passed` (2026-08-11, first full pass — previously `ready-for-qc`/
   `not-ready`, never tested as its own feature before). `player-state-001`/`002` (last-played-
   track and last-active-playlist persistence) and the newer `player-state-003` (seek-position

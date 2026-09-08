@@ -44,6 +44,16 @@ enum YtDlpRunner {
         let process = Process()
         process.executableURL = URL(fileURLWithPath: path)
         process.arguments = cookieArguments + arguments
+        // yt-dlp itself is already launched via an absolute path (see `YtDlpLocator`), but it
+        // internally shells out to a JS runtime (`deno`/`node`) to solve YouTube's "n" challenge
+        // via a bare PATH lookup of its own. A GUI-launched app's default PATH
+        // (`/usr/bin:/bin:/usr/sbin:/sbin`) doesn't include Homebrew's install dirs, so that
+        // internal lookup silently failed for every single track — found live 2026-09-08 (every
+        // resolution failing with "n challenge solving failed... The page needs to be reloaded",
+        // read in the UI as an infinite loading spinner from the auto-skip loop never landing on
+        // a resolvable track). Passing the same augmented PATH `YtDlpLocator` already builds for
+        // finding yt-dlp itself fixes this for yt-dlp's own child-process lookups too.
+        process.environment = ["PATH": YtDlpLocator.searchPath()]
 
         let stdoutPipe = Pipe()
         let stderrPipe = Pipe()
